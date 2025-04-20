@@ -1,0 +1,60 @@
+{% extends 'gcia_app/base.html' %}
+
+{% block title %}Upload Scheme Details{% endblock %}
+
+{% block content %}
+    <h1>Upload Scheme Details</h1>
+
+    <!-- Display Toast Notifications -->
+    {% if messages %}
+        <div id="toast-container">
+            {% for message in messages %}
+                <div class="toast {{ message.tags }}">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        </div>
+    {% endif %}
+
+    <div class="card">
+        <div class="card-body">
+            <form method="post" enctype="multipart/form-data" action="{% url 'process_amcfs_nav_and_returns' %}">
+                {% csrf_token %}
+                
+                <div class="form-group mb-3">
+                    {{ form.file_type.label_tag }}
+                    {{ form.file_type }}
+                    
+                </div>
+                
+                <div class="form-group mb-3">
+                    {{ form.excel_file.label_tag }}
+                    {{ form.excel_file }}
+                </div>
+                
+                <button type="submit" class="btn btn-primary">Upload and Process</button>
+            </form>
+        </div>
+    </div>
+{% endblock %}
+
+{% block extra_js %}
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            // Select all toast elements on the page
+            const toasts = document.querySelectorAll('.toast');
+
+            toasts.forEach(toast => {
+                // Delay the fade-out effect for 5 seconds
+                setTimeout(function() {
+                    toast.classList.add('fade');  // Add fade class to begin fading
+                }, 5000); // Wait for 5 seconds before starting the fade
+
+                // After the fade-out is complete (1 second), remove the toast from the DOM
+                setTimeout(function() {
+                    toast.remove();  // Remove toast after the fade effect is complete
+                }, 6000);  // Wait 1 second after fade for a total of 6 seconds
+            });
+        });
+    </script>
+{% endblock %}

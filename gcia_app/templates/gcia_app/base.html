@@ -1,0 +1,196 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Guardian Capital{% endblock %}</title>
+    <style>
+        /* General Reset */
+        body, html {
+            margin: 0;
+            padding: 0;
+            overflow-x: hidden; /* Prevent horizontal scrolling for the entire page */
+        }
+
+        /* Sidebar Styling */
+        .bg-black {
+            background-color: black;
+            color: white;
+            position: fixed;
+            top: 0;
+            left: 0;
+            height: 100vh;
+            width: 250px;
+            padding: 20px;
+            box-sizing: border-box;
+            transition: transform 0.3s ease;
+            overflow-y: auto; /* Allow vertical scrolling inside the sidebar */
+            overflow-x: hidden; /* Prevent horizontal scrolling */
+        }
+
+        .bg-black img {
+            display: block;
+            margin: 0 auto 20px; /* Center the logo and add space below it */
+            max-width: 80%; /* Ensure logo scales properly */
+            height: auto;
+        }
+
+        .bg-black .nav {
+            padding: 0;
+            margin: 0;
+        }
+
+        .bg-black .nav-item {
+            list-style: none; /* Remove the dots beside links */
+        }
+
+        .bg-black .nav-link {
+            color: white;
+            text-decoration: none;
+            padding: 10px;
+            display: block;
+            margin: 5px 0;
+            border-radius: 4px;
+        }
+
+        .bg-black .nav-link:hover {
+            background-color: #333;
+        }
+
+        /* Content Area */
+        .content-area {
+            margin-left: 250px;
+            padding: 20px;
+            background-color: #f8f9fa;
+            min-height: 100vh;
+        }
+
+        /* Hamburger Menu */
+        .hamburger {
+            display: none;
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            background-color: black;
+            color: white;
+            border: none;
+            padding: 10px 15px;
+            font-size: 18px;
+            cursor: pointer;
+            z-index: 1000;
+            border-radius: 5px;
+        }
+
+        /* Mobile View */
+        @media (max-width: 768px) {
+            .hamburger {
+                display: block;
+            }
+
+            .bg-black {
+                width: 100%; /* Sidebar takes full width in mobile view */
+                transform: translateX(-100%);
+                padding-top: 70px; /* Add space for hamburger icon */
+            }
+
+            .bg-black.active {
+                transform: translateX(0); /* Slide sidebar into view */
+            }
+
+            .content-area {
+                margin-left: 0;
+            }
+
+            .bg-black img {
+                margin-top: 10px; /* Add space below hamburger menu */
+                width: 60%; /* Scale logo for mobile */
+            }
+        }
+
+        .nav-link.active {
+            background-color: #555; /* Change the background color for the active link */
+            font-weight: bold;
+        }
+        
+    </style>
+
+    <style>
+        /* Toast Styles */
+        #toast-container {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+        }
+    
+        .toast {
+            background-color: #333;
+            color: white;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-radius: 5px;
+            opacity: 1;
+            transition: opacity 1s ease-out; /* Apply transition for smooth fade-out */
+            max-width: 300px;
+            min-width: 200px;
+            word-wrap: break-word;
+        }
+    
+        .toast.success {
+            background-color: #28a745;
+        }
+    
+        .toast.error {
+            background-color: #dc3545;
+        }
+    
+        /* Apply opacity 0 when fading out */
+        .toast.fade {
+            opacity: 0;
+        }
+    </style>
+    
+</head>
+<body>
+    <!-- Hamburger Button -->
+    <button class="hamburger" onclick="toggleSidebar()">☰</button>
+
+    <!-- Sidebar -->
+    <nav class="bg-black" id="sidebar">
+        <a href="{% url 'home' %}"><img src="{% static 'gcia_app/images/gc-h-logo.png' %}" alt="Guardian Capital"></a>
+        <ul class="nav">
+            <li class="nav-item">
+                <a href="{% url 'process_portfolio_valuation' %}" class="nav-link {% if request.path == "upload_scheme_data"|urlencode %}active{% endif %}">ECAS Portfolio</a>
+            </li>
+            <li class="nav-item">
+                <a href="{% url 'process_financial_planning' %}" class="nav-link {% if request.path == "portfolio_analysis" %}active{% endif %}">Financial Planning</a>
+            </li>
+            {% if request.user.is_superuser %}
+                <li class="nav-item">
+                    <a href="{% url 'process_amcfs_nav_and_returns' %}" class="nav-link {% if request.path == "financial_planning" %}active{% endif %}">Upload Fund Returns</a>
+                </li>
+            {% endif %}
+            <li class="nav-item">
+                <a href="{% url 'logout' %}" class="nav-link {% if request.path == '/logout' %}active{% endif %}">Logout</a>
+            </li>
+        </ul>
+        
+        
+    </nav>
+
+    <!-- Main Content -->
+    <div class="content-area">
+        {% block content %}
+        {% endblock %}
+    </div>
+
+    <!-- JavaScript -->
+    <script>
+        function toggleSidebar() {
+            const sidebar = document.getElementById('sidebar');
+            sidebar.classList.toggle('active');
+        }
+    </script>
+</body>
+</html>
