@@ -81,7 +81,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.mysql',
         'NAME': 'guardian_capital_db',
         'USER': 'gcia_admin',
-        'PASSWORD': 'GCIA123@',
+        'PASSWORD': 'Tech@gcia1234', #'GCIA123@',
         'HOST': 'localhost',
         'PORT': '3306',
     }
