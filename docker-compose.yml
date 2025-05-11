@@ -6,7 +6,7 @@ services:
     container_name: django_app
     command: gunicorn gcia.wsgi:application --bind 0.0.0.0:8000 --workers 4 --threads 2
     volumes:
-      - ./GUARCIAN_CAPITAL_IA:/app
+      - .:/app
     ports:
       - "8000:8000"
     environment:

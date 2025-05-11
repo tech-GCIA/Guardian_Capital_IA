@@ -9,11 +9,11 @@ ENV PYTHONUNBUFFERED 1
 WORKDIR /app
 
 # Copy the requirements file and install dependencies
-COPY ./GUARCIAN_CAPITAL_IA/requirements.txt /app/
+COPY requirements.txt /app/
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the entire project to the working directory
-COPY ./GUARCIAN_CAPITAL_IA /app/
+COPY . /app/
 
 # Expose the port (Gunicorn will run on port 8000)
 EXPOSE 8000
