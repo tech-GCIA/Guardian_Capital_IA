@@ -1,0 +1,32 @@
+name: CI/CD Django on Docker EC2
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Set up SSH
+      uses: webfactory/ssh-agent@v0.8.1
+      with:
+        ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
+
+    - name: Deploy to EC2
+      env:
+        HOST: ${{ secrets.EC2_PUBLIC_IP }}
+        USER: ubuntu
+      run: |
+        ssh -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
+        cd /home/ubuntu/django-app
+        git pull origin main
+        sudo docker-compose down
+        sudo docker-compose build
+        sudo docker-compose up -d --remove-orphans
+        EOF
