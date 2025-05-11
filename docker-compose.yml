@@ -7,6 +7,7 @@ services:
     command: gunicorn gcia.wsgi:application --bind 0.0.0.0:8000 --workers 4 --threads 2
     volumes:
       - .:/app
+      - ./static:/app/static  # Mount static files from the container to the host machine (optional)
     ports:
       - "8000:8000"
     environment:
@@ -15,7 +16,7 @@ services:
       - DB_NAME=guardian_capital_db
       - DB_USER=gcia_admin
       - DB_PASSWORD=Tech@gcia1234
-      - DB_HOST=localhost
+      - DB_HOST=db  # Use the db service name as the host
       - DB_PORT=5432
     depends_on:
       - db
@@ -24,9 +25,14 @@ services:
     image: postgres:15
     container_name: postgres_db
     environment:
-      POSTGRES_DB: mydatabase
-      POSTGRES_USER: myuser
-      POSTGRES_PASSWORD: mypassword
+      POSTGRES_DB: guardian_capital_db  # This should match DB_NAME in the web service
+      POSTGRES_USER: gcia_admin         # This should match DB_USER in the web service
+      POSTGRES_PASSWORD: Tech@gcia1234  # This should match DB_PASSWORD in the web service
       POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data  # Persist data to a named volume to retain DB data between restarts
+
+volumes:
+  pgdata:  # Create a named volume for PostgreSQL data persistence
