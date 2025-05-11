@@ -10,11 +10,12 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DEBUG=1
-      - DB_NAME=mydatabase
-      - DB_USER=myuser
-      - DB_PASSWORD=mypassword
-      - DB_HOST=db
+      - SECRET_KEY=django-insecure-pghn3et!0o2m@*vzv)8b7i@jn7_=p=k17nd@y7!%mi-n58fyyz
+      - DEBUG=True
+      - DB_NAME=guardian_capital_db
+      - DB_USER=gcia_admin
+      - DB_PASSWORD=Tech@gcia1234
+      - DB_HOST=localhost
       - DB_PORT=5432
     depends_on:
       - db
