@@ -15,24 +15,24 @@ services:
       - DEBUG=False
       - DB_NAME=guardian_capital_db
       - DB_USER=gcia_admin
-      - DB_PASSWORD=Tech@gcia1234
-      - DB_HOST=db  # Use the db service name as the host
-      - DB_PORT=5432
+      - DB_PASSWORD=Tech#gcia1234
+      - DB_HOST=guardian-capital-db.cpgmg2yycen4.ap-south-1.rds.amazonaws.com  # Use the db service name as the host
+      - DB_PORT=3306
     depends_on:
       - db
 
   db:
-    image: postgres:15
-    container_name: postgres_db
+    image: mysql:8.0
+    container_name: mysql_db
     environment:
-      POSTGRES_DB: guardian_capital_db  # This should match DB_NAME in the web service
-      POSTGRES_USER: gcia_admin         # This should match DB_USER in the web service
-      POSTGRES_PASSWORD: Tech@gcia1234  # This should match DB_PASSWORD in the web service
-      POSTGRES_HOST_AUTH_METHOD: trust
+      MYSQL_DATABASE: guardian_capital_db  # This should match DB_NAME in the web service
+      MYSQL_USER: gcia_admin               # This should match DB_USER in the web service
+      MYSQL_PASSWORD: Tech#gcia1234         # This should match DB_PASSWORD in the web service
+      MYSQL_ROOT_PASSWORD: Tech#gcia1234     # Set a root password
     ports:
-      - "5432:5432"
+      - "3306:3306"
     volumes:
-      - pgdata:/var/lib/postgresql/data  # Persist data to a named volume to retain DB data between restarts
+      - mysqldata:/var/lib/mysql  # Persist data to a named volume to retain DB data between restarts
 
 volumes:
-  pgdata:  # Create a named volume for PostgreSQL data persistence
+  mysqldata:  # Create a named volume for MySQL data persistence
