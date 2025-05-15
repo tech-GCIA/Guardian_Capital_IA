@@ -10,14 +10,8 @@ services:
       - ./static:/app/static  # Mount static files from the container to the host machine (optional)
     ports:
       - "8000:8000"
-    environment:
-      - SECRET_KEY=django-insecure-pghn3et!0o2m@*vzv)8b7i@jn7_=p=k17nd@y7!%mi-n58fyyz
-      - DEBUG=False
-      - DB_NAME=guardian_capital_db
-      - DB_USER=gcia_admin
-      - DB_PASSWORD=Tech#gcia1234
-      - DB_HOST=guardian-capital-db.cpgmg2yycen4.ap-south-1.rds.amazonaws.com  # Use the db service name as the host
-      - DB_PORT=3306
+    env_file:
+      - .env
     depends_on:
       - db
 
@@ -25,10 +19,10 @@ services:
     image: mysql:8.0
     container_name: mysql_db
     environment:
-      MYSQL_DATABASE: guardian_capital_db  # This should match DB_NAME in the web service
-      MYSQL_USER: gcia_admin               # This should match DB_USER in the web service
-      MYSQL_PASSWORD: Tech#gcia1234         # This should match DB_PASSWORD in the web service
-      MYSQL_ROOT_PASSWORD: Tech#gcia1234     # Set a root password
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD}
     ports:
       - "3306:3306"
     volumes:

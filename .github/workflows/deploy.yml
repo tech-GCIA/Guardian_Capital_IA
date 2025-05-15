@@ -10,14 +10,17 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+    # Checkout code from the repository
     - name: Checkout code
       uses: actions/checkout@v3
 
+    # Set up SSH to connect to EC2
     - name: Set up SSH
       uses: webfactory/ssh-agent@v0.8.1
       with:
         ssh-private-key: ${{ secrets.EC2_SSH_KEY }}
 
+    # Deploy to EC2
     - name: Deploy to EC2
       env:
         HOST: ${{ secrets.EC2_PUBLIC_IP }}
@@ -25,7 +28,21 @@ jobs:
       run: |
         ssh -o StrictHostKeyChecking=no $USER@$HOST << 'EOF'
         cd /home/ubuntu/backend/Guardian_Capital_IA
+
+        # Update code from the main branch
         git pull origin main
+
+        # Create .env file with secrets
+        echo "SECRET_KEY=${{ secrets.SECRET_KEY }}" > .env
+        echo "DEBUG=False" >> .env
+        echo "DB_NAME=${{ secrets.DB_NAME }}" >> .env
+        echo "DB_USER=${{ secrets.DB_USER }}" >> .env
+        echo "DB_PASSWORD=${{ secrets.DB_PASSWORD }}" >> .env
+        echo "DB_HOST=${{ secrets.DB_HOST }}" >> .env
+        echo "DB_PORT=${{ secrets.DB_PORT }}" >> .env
+        echo "MYSQL_ROOT_PASSWORD=${{ secrets.DB_ROOT_PASSWORD }}" >> .env
+
+        # Restart Docker containers with the updated environment
         docker-compose down
         docker-compose up --build -d --remove-orphans
         EOF
