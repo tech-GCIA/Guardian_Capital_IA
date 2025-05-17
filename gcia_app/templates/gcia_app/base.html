@@ -168,7 +168,7 @@
             </li>
             {% if request.user.is_superuser %}
                 <li class="nav-item">
-                    <a href="{% url 'process_amcfs_nav_and_returns' %}" class="nav-link {% if request.path == "financial_planning" %}active{% endif %}">Upload Fund Returns</a>
+                    <a href="{% url 'process_amcfs_nav_and_returns' %}" class="nav-link {% if request.path == "financial_planning" %}active{% endif %}">Upload Master Data</a>
                 </li>
             {% endif %}
             <li class="nav-item">

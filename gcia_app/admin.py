@@ -79,11 +79,24 @@ class AMCFundSchemeAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
             return super(AMCFundSchemeAdmin, self).get_queryset(request).select_related('AMCFund', 'AMCFund__AMC')
         else:
             return super(AMCFundSchemeAdmin, self).get_queryset(request)
+        
+# class AMCFundSchemeNavLogAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
+#     search_fields = ['amcfundscheme__name']
+#     list_display = ('amcfundschemenavlog_id', 'amcfundscheme__name', 'as_on_date', 'nav')
+
+#     raw_id_fields = ['amcfundscheme']
+
+#     def get_queryset(self, request):
+#         if 'change' not in request.get_full_path():
+#             return super(AMCFundSchemeNavLogAdmin, self).get_queryset(request).select_related('amcfundscheme')
+#         else:
+#             return super(AMCFundSchemeNavLogAdmin, self).get_queryset(request)
 
 # Register the model with the custom admin class
 admin.site.register(Customer, CustomerAdmin)
 admin.site.register(AMC, AMCAdmin)
 admin.site.register(AMCFund, AMCFundAdmin)
 admin.site.register(AMCFundScheme, AMCFundSchemeAdmin)
+# admin.site.register(AMCFundSchemeNavLog, AMCFundSchemeNavLogAdmin)
 
 
