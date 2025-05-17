@@ -138,3 +138,8 @@ STATICFILES_DIRS = [os.path.join(BASE_DIR, 'gcia_app', 'static')]
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 AUTH_USER_MODEL = "gcia_app.Customer"
+
+# Authentication settings
+LOGIN_URL = '/app/login/'  # Points to your custom login view
+LOGIN_REDIRECT_URL = '/app/home/'  # Where to go after successful login
+LOGOUT_REDIRECT_URL = '/app/login/'  # Where to go after logout
