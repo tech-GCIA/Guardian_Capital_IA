@@ -51,6 +51,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'gcia_app.middleware.LoginRedirectMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -143,3 +144,7 @@ AUTH_USER_MODEL = "gcia_app.Customer"
 LOGIN_URL = '/app/login/'  # Points to your custom login view
 LOGIN_REDIRECT_URL = '/app/home/'  # Where to go after successful login
 LOGOUT_REDIRECT_URL = '/app/login/'  # Where to go after logout
+
+# In settings.py
+SESSION_COOKIE_AGE = 3600  # Session timeout in seconds (e.g., 1 hour)
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True  # Session expires when browser closes

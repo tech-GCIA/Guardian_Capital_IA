@@ -19,3 +19,19 @@ class SessionTimeoutMiddleware:
             request.session['last_activity'] = now().isoformat()
 
         return self.get_response(request)
+    
+
+class LoginRedirectMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        response = self.get_response(request)
+        # If we hit a 404 for /accounts/login/, redirect to the correct login URL
+        if response.status_code == 404 and request.path == '/accounts/login/':
+            next_url = request.GET.get('next', '')
+            if next_url:
+                return redirect(f'/app/login/?next={next_url}')
+            return redirect('/app/login/')
+            
+        return response
