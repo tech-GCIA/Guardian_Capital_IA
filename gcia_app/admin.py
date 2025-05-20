@@ -35,7 +35,7 @@ class CustomerAdmin(admin.ModelAdmin):
     search_fields = ('first_name', 'last_name', 'email') # Add search capability for first name, last name, and email
     ordering = ('customer_id',) # Allow sorting by customer_id
     list_per_page = 100 # Enable pagination
-    readonly_fields = ('password',)
+    # readonly_fields = ('password',)
 
     # actions = ['generate_random_password']
     
