@@ -1,9 +1,11 @@
-from django.contrib import admin
-
 # Register your models here.
-from django.contrib import admin
+from django.contrib import admin, messages
 from gcia_app.models import *
 from import_export.admin import ImportExportModelAdmin
+import string
+import random
+from django.utils.crypto import get_random_string
+from django.contrib.auth.hashers import make_password
 
 class ReadOnlyModelAdmin(admin.ModelAdmin):
     """Make all fields read-only for non-staff users."""
@@ -33,11 +35,30 @@ class CustomerAdmin(admin.ModelAdmin):
     search_fields = ('first_name', 'last_name', 'email') # Add search capability for first name, last name, and email
     ordering = ('customer_id',) # Allow sorting by customer_id
     list_per_page = 100 # Enable pagination
+    readonly_fields = ('password',)
 
+    actions = ['generate_random_password']
+    
     # Custom queryset for displaying records
     def get_queryset(self, request):
         queryset = super().get_queryset(request)
         return queryset
+    
+    def generate_random_password(self, request, queryset):
+        """Admin action to generate and save a strong random password."""
+        characters = string.ascii_letters + string.digits + string.punctuation
+        for customer in queryset:
+            raw_password = get_random_string(12, characters)
+            customer.password = make_password(raw_password)
+            customer.save()
+            self.message_user(
+                request,
+                f"Password for {customer.email} updated to: {raw_password}",
+                level=messages.INFO
+            )
+
+    generate_random_password.short_description = "Generate and set a strong random password (12 characters)"
+
 
 class AMCAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
     search_fields = ['name']
