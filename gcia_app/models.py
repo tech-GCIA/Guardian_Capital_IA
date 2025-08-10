@@ -12,51 +12,11 @@ class Customer(AbstractUser):
 
     def __str__(self):
         return str(self.customer_id)
-    
-class AMC(models.Model):
-	"""
-	Stores a Asset Management Company(AMC) entry, related to model:kbapp.RegistrarTransferAgency
-	and model:kbapp.Country.
-	"""
-	amc_id = models.AutoField(primary_key=True)
-	name = models.CharField(max_length=200, unique=True, verbose_name='Name of the Asset Management Company', db_index=True)
-	assets_under_management = models.FloatField(default=0.0, blank=True, null=True)
-	is_active = models.BooleanField(default=False)
-	description = models.CharField(max_length=200, default=' ', blank=True, null=True)
-	created = models.DateTimeField(auto_now_add=True)
-	modified = models.DateTimeField(auto_now=True)
-	registrartransferagency = models.CharField(max_length=200, blank=True, null=True)
-	amc_logo = models.URLField(blank=True, null=True)
-	amc_website_url = models.URLField(blank=True, null=True)
-
-	def _str_(self):
-		"""This defines how the :model:kbapp.AMC object will be represented."""
-		return str(self.name)
-
-class AMCFund(models.Model):
-	"""
-	Stores :model:kbapp.AMCFund entries, related to Many-to-one relationships with :model:kbapp.AMC. An AMCFund is a parent of all related :model: AMCFundscheme objects.
-	"""
-	AMC = models.ForeignKey(AMC, on_delete=models.CASCADE,null=True, blank=True)
-	amcfund_id = models.AutoField(primary_key=True)
-	name = models.CharField(default='', max_length=255)
-	description = models.TextField(max_length=1024, default=' ', blank=True)
-	assets_under_management = models.FloatField(default=0.0, blank=True, null=True)
-	launch_date = models.DateField(null=True, blank=True)
-	is_active = models.BooleanField(default=False)
-	fund_class = models.CharField(max_length=255, null=True, blank=True, db_index=True)
-	created = models.DateTimeField(auto_now_add=True)
-	modified = models.DateTimeField(auto_now=True)
-
-	def _str_(self):
-		"""This defines how the :model:kbapp.AMCFund object will be represented."""
-		return str(self.name)
 
 class AMCFundScheme(models.Model):
 	"""
 	Stores the mutual fund scheme entries (eg: growth, dividend), that belong to an :model:kbapp.AMCFund.
 	"""
-	AMCFund = models.ForeignKey(AMCFund, on_delete=models.CASCADE,null=True, blank=True)
 	amcfundscheme_id = models.AutoField(primary_key=True)
 	name = models.CharField(default='', max_length=200, unique=True, verbose_name='Full Scheme Name', db_index=True)
 	fund_name = models.CharField(default='', max_length=200, db_index=True)

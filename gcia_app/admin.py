@@ -59,33 +59,6 @@ class CustomerAdmin(admin.ModelAdmin):
 
     # generate_random_password.short_description = "Generate and set a strong random password (12 characters)"
 
-
-class AMCAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
-    search_fields = ['name']
-    list_display = ('amc_id', 'name', 'assets_under_management', 'is_active', 'registrartransferagency')
-    readonly_fields = ['amc_id', 'created', 'modified','assets_under_management']
-
-    list_filter = ['is_active']
-
-    def get_queryset(self, request):
-        if 'change' not in request.get_full_path():
-            return super(AMCAdmin, self).get_queryset(request).only('name','is_active','assets_under_management', 'registrartransferagency', 'created', 'modified')
-        else:
-            return super(AMCAdmin, self).get_queryset(request)
-        
-class AMCFundAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
-    search_fields = ['name']
-    list_display = ('amcfund_id', 'name', 'fund_class', 'assets_under_management', 'is_active', 'launch_date')
-    readonly_fields = ['amcfund_id', 'created', 'modified','assets_under_management']
-
-    list_filter = ['is_active']
-    raw_id_fields = ['AMC']
-
-    def get_queryset(self, request):
-        if 'change' not in request.get_full_path():
-            return super(AMCFundAdmin, self).get_queryset(request).select_related('AMC')
-        else:
-            return super(AMCFundAdmin, self).get_queryset(request)
         
 class AMCFundSchemeAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
     search_fields = ['name']
@@ -93,11 +66,10 @@ class AMCFundSchemeAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
     readonly_fields = ['amcfundscheme_id', 'created', 'modified','assets_under_management']
 
     list_filter = ['is_active', 'is_direct_fund', 'is_scheme_benchmark']
-    raw_id_fields = ['AMCFund']
 
     def get_queryset(self, request):
         if 'change' not in request.get_full_path():
-            return super(AMCFundSchemeAdmin, self).get_queryset(request).select_related('AMCFund', 'AMCFund__AMC')
+            return super(AMCFundSchemeAdmin, self).get_queryset(request)
         else:
             return super(AMCFundSchemeAdmin, self).get_queryset(request)
         
@@ -115,8 +87,6 @@ class AMCFundSchemeNavLogAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
 
 # Register the model with the custom admin class
 admin.site.register(Customer, CustomerAdmin)
-admin.site.register(AMC, AMCAdmin)
-admin.site.register(AMCFund, AMCFundAdmin)
 admin.site.register(AMCFundScheme, AMCFundSchemeAdmin)
 admin.site.register(AMCFundSchemeNavLog, AMCFundSchemeNavLogAdmin)
 
