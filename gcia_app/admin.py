@@ -90,4 +90,120 @@ admin.site.register(Customer, CustomerAdmin)
 admin.site.register(AMCFundScheme, AMCFundSchemeAdmin)
 admin.site.register(AMCFundSchemeNavLog, AMCFundSchemeNavLogAdmin)
 
+# Add this to gcia_app/admin.py
 
+from django.contrib import admin
+from gcia_app.models import Stock, StockQuarterlyData, StockUploadLog
+
+@admin.register(Stock)
+class StockAdmin(admin.ModelAdmin):
+    list_display = ('stock_id', 'name', 'symbol', 'sector', 'industry', 'is_active', 'created')
+    list_filter = ('sector', 'industry', 'market_cap_category', 'is_active', 'created')
+    search_fields = ('name', 'symbol', 'sector', 'industry', 'isin')
+    readonly_fields = ('stock_id', 'created', 'modified')
+    list_per_page = 100
+    ordering = ('name',)
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('name', 'symbol', 'isin', 'is_active')
+        }),
+        ('Classification', {
+            'fields': ('sector', 'industry', 'market_cap_category')
+        }),
+        ('Dates', {
+            'fields': ('listing_date',)
+        }),
+        ('System Fields', {
+            'fields': ('stock_id', 'created', 'modified'),
+            'classes': ('collapse',)
+        })
+    )
+
+
+@admin.register(StockQuarterlyData)
+class StockQuarterlyDataAdmin(admin.ModelAdmin):
+    list_display = (
+        'quarterly_data_id', 'stock_symbol', 'quarter_label', 
+        'mcap', 'pat', 'pe_ratio', 'created'
+    )
+    list_filter = (
+        'quarter_year', 'quarter_number', 'stock__sector', 
+        'stock__industry', 'created'
+    )
+    search_fields = ('stock__name', 'stock__symbol')
+    readonly_fields = ('quarterly_data_id', 'created', 'modified')
+    list_per_page = 100
+    ordering = ('-quarter_year', '-quarter_number', 'stock__name')
+    raw_id_fields = ('stock',)
+    
+    fieldsets = (
+        ('Stock & Quarter Info', {
+            'fields': ('stock', 'quarter_year', 'quarter_number', 'quarter_date')
+        }),
+        ('Market Metrics', {
+            'fields': ('mcap', 'price', 'pe_ratio', 'pb_ratio')
+        }),
+        ('Financial Metrics', {
+            'fields': ('revenue', 'ebitda', 'net_profit', 'pat', 'ttm')
+        }),
+        ('Ratios & Returns', {
+            'fields': ('book_value', 'dividend_yield', 'roe', 'roa', 'debt_to_equity')
+        }),
+        ('System Fields', {
+            'fields': ('quarterly_data_id', 'created', 'modified'),
+            'classes': ('collapse',)
+        })
+    )
+    
+    def stock_symbol(self, obj):
+        return obj.stock.symbol
+    stock_symbol.short_description = 'Symbol'
+    stock_symbol.admin_order_field = 'stock__symbol'
+    
+    def quarter_label(self, obj):
+        return f"Q{obj.quarter_number}-{obj.quarter_year}"
+    quarter_label.short_description = 'Quarter'
+    quarter_label.admin_order_field = 'quarter_year'
+
+
+@admin.register(StockUploadLog)
+class StockUploadLogAdmin(admin.ModelAdmin):
+    list_display = (
+        'upload_id', 'filename', 'uploaded_by', 'status', 
+        'stocks_added', 'quarterly_records_added', 'uploaded_at'
+    )
+    list_filter = ('status', 'uploaded_at', 'uploaded_by')
+    search_fields = ('filename', 'uploaded_by__username', 'uploaded_by__email')
+    readonly_fields = (
+        'upload_id', 'uploaded_at', 'processing_started_at', 
+        'processing_completed_at', 'processing_time'
+    )
+    list_per_page = 50
+    ordering = ('-uploaded_at',)
+    
+    fieldsets = (
+        ('Upload Info', {
+            'fields': ('filename', 'uploaded_by', 'file_size', 'status')
+        }),
+        ('Processing Results', {
+            'fields': (
+                'stocks_added', 'stocks_updated', 
+                'quarterly_records_added', 'quarterly_records_updated'
+            )
+        }),
+        ('Timing', {
+            'fields': (
+                'uploaded_at', 'processing_started_at', 
+                'processing_completed_at', 'processing_time'
+            )
+        }),
+        ('Error Details', {
+            'fields': ('error_message',),
+            'classes': ('collapse',)
+        })
+    )
+    
+    def has_add_permission(self, request):
+        # Don't allow manual creation of upload logs
+        return False

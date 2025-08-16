@@ -48,3 +48,51 @@ class MasterDataExcelUploadForm(forms.Form):
         widget=forms.FileInput(attrs={'class': 'form-control-file'}),
         label="Excel File"
     )
+
+# Add this to gcia_app/forms.py
+
+from django import forms
+from django.core.exceptions import ValidationError
+import os
+
+class StockDataUploadForm(forms.Form):
+    """
+    Form for uploading Excel files containing stock data
+    """
+    excel_file = forms.FileField(
+        widget=forms.FileInput(attrs={
+            'class': 'form-control-file',
+            'accept': '.xls,.xlsx,.xlsm',
+            'id': 'stockDataFile'
+        }),
+        label="Stock Data Excel File",
+        help_text="Upload an Excel file (.xls, .xlsx, .xlsm) containing stock data from App-Base Sheet"
+    )
+    
+    def clean_excel_file(self):
+        """
+        Validate the uploaded Excel file
+        """
+        excel_file = self.cleaned_data['excel_file']
+        
+        # Check file extension
+        if excel_file:
+            file_extension = os.path.splitext(excel_file.name)[1].lower()
+            allowed_extensions = ['.xls', '.xlsx', '.xlsm']
+            
+            if file_extension not in allowed_extensions:
+                raise ValidationError(
+                    f"Invalid file type. Please upload an Excel file with one of these extensions: {', '.join(allowed_extensions)}"
+                )
+            
+            # Check file size (limit to 50MB)
+            if excel_file.size > 50 * 1024 * 1024:  # 50MB in bytes
+                raise ValidationError("File size too large. Please upload a file smaller than 50MB.")
+            
+            # Check if file has content
+            if excel_file.size == 0:
+                raise ValidationError("The uploaded file is empty. Please upload a valid Excel file.")
+        
+        return excel_file
+    
+
