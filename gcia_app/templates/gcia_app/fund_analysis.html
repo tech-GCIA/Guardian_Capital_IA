@@ -1,0 +1,431 @@
+{% extends 'gcia_app/base.html' %}
+{% load static %}
+
+{% block title %}Fund Analysis{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-12">
+            <h1 class="mb-4">Fund Analysis</h1>
+            
+            <!-- Fund Name Input -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-8">
+                            <label for="fundName" class="form-label">Fund Name</label>
+                            <input type="text" id="fundName" class="form-control" placeholder="Enter Fund Name (e.g., Old Bridge Focused Equity Fund)" />
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Selected Stocks Table -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0">Selected Stocks</h5>
+                    <button type="button" class="btn btn-success" id="generateReportBtn" onclick="generateReport()">Generate Report</button>
+                </div>
+                <div class="card-body">
+                    <div class="table-responsive">
+                        <table class="table table-striped table-hover">
+                            <thead class="table-dark">
+                                <tr>
+                                    <th>Stock Name</th>
+                                    <th>Weightage (%)</th>
+                                    <th>Number of Shares</th>
+                                    <th>Action</th>
+                                </tr>
+                            </thead>
+                            <tbody id="stocksTableBody">
+                                <tr id="emptyRow">
+                                    <td colspan="4" class="text-center text-muted py-4">
+                                        No stocks selected. Use the form below to add stocks.
+                                    </td>
+                                </tr>
+                            </tbody>
+                            <tfoot class="table-light">
+                                <tr>
+                                    <th>Total</th>
+                                    <th id="totalWeightage">0.00%</th>
+                                    <th id="totalStocks">0 stocks</th>
+                                    <th></th>
+                                </tr>
+                            </tfoot>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Add Stock Form -->
+            <div class="card shadow-sm">
+                <div class="card-header bg-success text-white">
+                    <h5 class="mb-0">Add Stock to Portfolio</h5>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-4">
+                            <label for="stockSelect" class="form-label">Stock</label>
+                            <select id="stockSelect" class="form-control">
+                                <option value="">-- Select a Stock --</option>
+                                {% for stock in all_stocks %}
+                                <option value="{{ stock.stock_id }}" 
+                                        data-name="{{ stock.name }}" 
+                                        data-symbol="{{ stock.symbol }}"
+                                        data-sector="{{ stock.sector|default:'' }}">
+                                    {{ stock.name }} ({{ stock.symbol }})
+                                </option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label for="stockWeightage" class="form-label">Weightage (%)</label>
+                            <input 
+                                type="number" 
+                                id="stockWeightage" 
+                                class="form-control" 
+                                placeholder="0.00" 
+                                step="0.01" 
+                                min="0.01" 
+                                max="100.00"
+                            />
+                        </div>
+                        <div class="col-md-3">
+                            <label for="stockShares" class="form-label">Number of Shares</label>
+                            <input 
+                                type="number" 
+                                id="stockShares" 
+                                class="form-control" 
+                                placeholder="0" 
+                                min="1"
+                            />
+                        </div>
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button type="button" class="btn btn-primary w-100" onclick="addStock()">Add Stock</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Alert Messages -->
+            <div id="alerts" class="mt-4"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Global variables
+let selectedStocks = [];
+
+// Page loaded
+console.log('Fund Analysis page loaded');
+
+// Add stock function
+function addStock() {
+    console.log('Add stock button clicked');
+    
+    // Get form elements
+    const stockSelect = document.getElementById('stockSelect');
+    const weightageInput = document.getElementById('stockWeightage');
+    const sharesInput = document.getElementById('stockShares');
+    
+    // Get values
+    const stockId = stockSelect.value;
+    const selectedOption = stockSelect.options[stockSelect.selectedIndex];
+    const stockName = selectedOption ? selectedOption.getAttribute('data-name') : '';
+    const stockSymbol = selectedOption ? selectedOption.getAttribute('data-symbol') : '';
+    const weightage = parseFloat(weightageInput.value);
+    const shares = parseInt(sharesInput.value);
+    
+    console.log('Form values:', { stockId, stockName, stockSymbol, weightage, shares });
+    
+    // Validate
+    if (!stockId) {
+        showAlert('Please select a stock', 'warning');
+        return;
+    }
+    
+    if (!weightage || weightage <= 0 || weightage > 100) {
+        showAlert('Please enter valid weightage (0.01 - 100)', 'warning');
+        return;
+    }
+    
+    if (!shares || shares <= 0) {
+        showAlert('Please enter valid number of shares (minimum 1)', 'warning');
+        return;
+    }
+    
+    // Check if stock already exists
+    const existingStock = selectedStocks.find(stock => stock.id === stockId);
+    if (existingStock) {
+        showAlert('Stock already added to portfolio', 'warning');
+        return;
+    }
+    
+    // Check total weightage
+    const currentTotal = selectedStocks.reduce((sum, stock) => sum + stock.weightage, 0);
+    if (currentTotal + weightage > 100) {
+        showAlert(`Total weightage would exceed 100%. Current: ${currentTotal.toFixed(2)}%`, 'warning');
+        return;
+    }
+    
+    // Add stock to array
+    const newStock = {
+        id: stockId,
+        name: stockName,
+        symbol: stockSymbol,
+        weightage: weightage,
+        shares: shares
+    };
+    
+    selectedStocks.push(newStock);
+    console.log('Stock added:', newStock);
+    console.log('Total stocks:', selectedStocks.length);
+    
+    // Update table
+    updateTable();
+    
+    // Reset form
+    stockSelect.value = '';
+    weightageInput.value = '';
+    sharesInput.value = '';
+    
+    // Show success message
+    showAlert(`${stockName} added successfully!`, 'success');
+}
+
+// Update table function
+function updateTable() {
+    console.log('Updating table...');
+    
+    const tableBody = document.getElementById('stocksTableBody');
+    const emptyRow = document.getElementById('emptyRow');
+    const totalWeightageSpan = document.getElementById('totalWeightage');
+    const totalStocksSpan = document.getElementById('totalStocks');
+    
+    // Clear existing rows (except empty row)
+    const existingRows = tableBody.querySelectorAll('tr:not(#emptyRow)');
+    existingRows.forEach(row => row.remove());
+    
+    if (selectedStocks.length === 0) {
+        // Show empty row
+        emptyRow.style.display = '';
+    } else {
+        // Hide empty row
+        emptyRow.style.display = 'none';
+        
+        // Add stock rows
+        selectedStocks.forEach((stock, index) => {
+            const row = document.createElement('tr');
+            row.innerHTML = `
+                <td>${stock.name} (${stock.symbol})</td>
+                <td>${stock.weightage.toFixed(2)}%</td>
+                <td>${stock.shares.toLocaleString()}</td>
+                <td>
+                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="removeStock(${index})">
+                        ×
+                    </button>
+                </td>
+            `;
+            tableBody.appendChild(row);
+        });
+    }
+    
+    // Update totals
+    const totalWeightage = selectedStocks.reduce((sum, stock) => sum + stock.weightage, 0);
+    const stockCount = selectedStocks.length;
+    
+    totalWeightageSpan.textContent = totalWeightage.toFixed(2) + '%';
+    totalStocksSpan.textContent = stockCount + ' stock' + (stockCount !== 1 ? 's' : '');
+    
+    // Color code weightage
+    if (totalWeightage > 100) {
+        totalWeightageSpan.style.color = 'red';
+    } else if (totalWeightage === 100) {
+        totalWeightageSpan.style.color = 'green';
+    } else {
+        totalWeightageSpan.style.color = 'inherit';
+    }
+    
+    console.log('Table updated. Total stocks:', stockCount, 'Total weightage:', totalWeightage.toFixed(2) + '%');
+}
+
+// Remove stock function
+function removeStock(index) {
+    console.log('Removing stock at index:', index);
+    
+    const removedStock = selectedStocks[index];
+    selectedStocks.splice(index, 1);
+    
+    updateTable();
+    showAlert(`${removedStock.name} removed from portfolio`, 'info');
+}
+
+// Generate report function
+function generateReport() {
+    console.log('Generate report clicked');
+    
+    const fundName = document.getElementById('fundName').value.trim();
+    
+    // Validate
+    if (!fundName) {
+        showAlert('Please enter a fund name', 'warning');
+        return;
+    }
+    
+    if (selectedStocks.length === 0) {
+        showAlert('Please add at least one stock', 'warning');
+        return;
+    }
+    
+    const totalWeightage = selectedStocks.reduce((sum, stock) => sum + stock.weightage, 0);
+    if (totalWeightage > 100) {
+        showAlert(`Total weightage (${totalWeightage.toFixed(2)}%) cannot exceed 100%`, 'error');
+        return;
+    }
+    
+    // Show success for now
+    showAlert(`Fund "${fundName}" created with ${selectedStocks.length} stocks and ${totalWeightage.toFixed(2)}% weightage`, 'success');
+    
+    // TODO: Implement actual report generation in Step 5.3
+    console.log('Fund data:', {
+        fundName: fundName,
+        selectedStocks: selectedStocks,
+        totalWeightage: totalWeightage
+    });
+}
+
+// Show alert function
+function showAlert(message, type) {
+    console.log('Showing alert:', message, type);
+    
+    const alertsContainer = document.getElementById('alerts');
+    
+    const alertDiv = document.createElement('div');
+    alertDiv.className = `alert alert-${type === 'error' ? 'danger' : type} alert-dismissible fade show`;
+    alertDiv.innerHTML = `
+        ${message}
+        <button type="button" class="btn-close" onclick="this.parentElement.remove()">×</button>
+    `;
+    
+    // Remove existing alerts of same type
+    const existingAlerts = alertsContainer.querySelectorAll(`.alert-${type === 'error' ? 'danger' : type}`);
+    existingAlerts.forEach(alert => alert.remove());
+    
+    alertsContainer.appendChild(alertDiv);
+    
+    // Auto remove after 5 seconds
+    setTimeout(() => {
+        if (alertDiv.parentNode) {
+            alertDiv.remove();
+        }
+    }, 5000);
+}
+
+// Test function for debugging
+function testAddStock() {
+    console.log('Test function called');
+    
+    const stockSelect = document.getElementById('stockSelect');
+    const weightageInput = document.getElementById('stockWeightage');
+    const sharesInput = document.getElementById('stockShares');
+    
+    // Set test values
+    if (stockSelect.options.length > 1) {
+        stockSelect.selectedIndex = 1; // Select first stock
+        weightageInput.value = '25.50';
+        sharesInput.value = '1000';
+        
+        console.log('Test values set, calling addStock()');
+        addStock();
+    } else {
+        console.log('No stocks available for testing');
+    }
+}
+
+// Initialize on page load
+document.addEventListener('DOMContentLoaded', function() {
+    console.log('DOM loaded, initializing...');
+    
+    // Check if elements exist
+    const stockSelect = document.getElementById('stockSelect');
+    const stocksTableBody = document.getElementById('stocksTableBody');
+    
+    if (!stockSelect) {
+        console.error('stockSelect not found');
+        return;
+    }
+    
+    if (!stocksTableBody) {
+        console.error('stocksTableBody not found');
+        return;
+    }
+    
+    console.log('Elements found successfully');
+    console.log('Stocks in dropdown:', stockSelect.options.length - 1);
+    
+    // Initialize table
+    updateTable();
+    
+    console.log('Fund Analysis initialized');
+});
+</script>
+
+<style>
+/* Form styling */
+.form-control:focus {
+    border-color: #80bdff;
+    box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+}
+
+/* Table styling */
+.table th, .table td {
+    vertical-align: middle;
+}
+
+/* Card styling */
+.card {
+    border: none;
+    border-radius: 10px;
+}
+
+.card-header {
+    border-radius: 10px 10px 0 0 !important;
+}
+
+/* Button styling */
+.btn-outline-danger:hover {
+    color: #fff;
+    background-color: #dc3545;
+    border-color: #dc3545;
+}
+
+/* Alert styling */
+.alert {
+    border-radius: 8px;
+    margin-bottom: 10px;
+}
+
+.btn-close {
+    background: none;
+    border: none;
+    font-size: 1.2rem;
+    cursor: pointer;
+    padding: 0.25rem;
+    line-height: 1;
+}
+
+/* Make dropdown easier to use */
+#stockSelect {
+    height: 38px;
+    font-size: 14px;
+}
+
+/* Highlight button on hover */
+.btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+</style>
+{% endblock %}

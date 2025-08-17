@@ -7,9 +7,9 @@ from datetime import timedelta
 from gcia_app.forms import CustomerCreationForm
 from django.contrib import messages
 import openpyxl
-from django.http import HttpResponse
+from django.http import HttpResponse, JsonResponse
 from gcia_app.forms import ExcelUploadForm, MasterDataExcelUploadForm
-from gcia_app.models import AMCFundScheme, AMCFundSchemeNavLog
+from gcia_app.models import AMCFundScheme, AMCFundSchemeNavLog, Stock
 import pandas as pd
 import os
 import datetime
@@ -21,6 +21,9 @@ import re
 from difflib import SequenceMatcher
 from django.db import transaction
 from gcia_app.index_scrapper_from_screener import get_bse500_pe_ratio
+import json
+from django.db.models import Q
+from django.core.exceptions import ValidationError
 
 def signup_view(request):
     if request.method == 'POST':
@@ -1177,3 +1180,135 @@ def upload_stock_data(request):
     
     return render(request, 'gcia_app/upload_stock_data.html', context)
 
+# Add this view to your existing gcia_app/views.py
+
+# Replace your search_stocks view in gcia_app/views.py with this improved version:
+
+@login_required
+def search_stocks(request):
+    """
+    AJAX endpoint for stock search functionality with debugging
+    """
+    query = request.GET.get('q', '').strip()
+    
+    print(f"Search request received: query='{query}'")  # Debug log
+    
+    if len(query) < 2:
+        print("Query too short, returning empty results")  # Debug log
+        return JsonResponse({'stocks': []})
+    
+    try:
+        # Search in both name and symbol
+        stocks = Stock.objects.filter(
+            Q(name__icontains=query) | Q(symbol__icontains=query),
+            is_active=True
+        ).order_by('name')[:20]  # Limit to 20 results for performance
+        
+        print(f"Found {stocks.count()} stocks matching '{query}'")  # Debug log
+        
+        stock_data = [
+            {
+                'id': stock.stock_id,
+                'name': stock.name,
+                'symbol': stock.symbol,
+                'sector': stock.sector or '',
+                'display_name': f"{stock.name} ({stock.symbol})"
+            }
+            for stock in stocks
+        ]
+        
+        print(f"Returning {len(stock_data)} stock results")  # Debug log
+        return JsonResponse({'stocks': stock_data})
+        
+    except Exception as e:
+        print(f"Error in search_stocks: {e}")  # Debug log
+        return JsonResponse({'stocks': [], 'error': str(e)})
+
+# Also update your fund_analysis view to include debug info:
+
+@login_required
+def fund_analysis(request):
+    """
+    Fund Analysis page with simple stock selection and table management
+    """
+    # Get all active stocks for the search dropdown
+    all_stocks = Stock.objects.filter(is_active=True).order_by('name')
+    
+    print(f"Loading fund_analysis page with {all_stocks.count()} active stocks")  # Debug log
+    
+    context = {
+        'all_stocks': all_stocks,
+        'all_stocks_json': json.dumps([
+            {
+                'id': stock.stock_id,
+                'name': stock.name,
+                'symbol': stock.symbol,
+                'sector': stock.sector or '',
+                'display_name': f"{stock.name} ({stock.symbol})"
+            }
+            for stock in all_stocks
+        ])
+    }
+    
+    return render(request, 'gcia_app/fund_analysis.html', context)
+
+@login_required
+def generate_fund_report_simple(request):
+    """
+    Simple fund report generation with validation
+    """
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body)
+            fund_name = data.get('fund_name', '').strip()
+            selected_stocks = data.get('selected_stocks', [])
+            
+            # Validation
+            if not fund_name:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Please enter a fund name'
+                })
+            
+            if not selected_stocks:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Please select at least one stock'
+                })
+            
+            # Calculate total weightage
+            total_weightage = sum(float(stock.get('weightage', 0)) for stock in selected_stocks)
+            
+            if total_weightage > 100:
+                return JsonResponse({
+                    'success': False,
+                    'message': f'Total weightage ({total_weightage:.2f}%) cannot exceed 100%'
+                })
+            
+            if total_weightage <= 0:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Total weightage must be greater than 0%'
+                })
+            
+            # Store in session for report generation (Step 5.3)
+            request.session['fund_data'] = {
+                'fund_name': fund_name,
+                'total_weightage': total_weightage,
+                'stock_count': len(selected_stocks),
+                'stock_selections': selected_stocks
+            }
+            
+            return JsonResponse({
+                'success': True,
+                'message': f'Fund "{fund_name}" created successfully with {len(selected_stocks)} stocks and {total_weightage:.2f}% total weightage',
+                'redirect_url': '/app/fund_report_preview/'  # For Step 5.3
+            })
+            
+        except Exception as e:
+            return JsonResponse({
+                'success': False,
+                'message': f'An error occurred: {str(e)}'
+            })
+    
+    return JsonResponse({'success': False, 'message': 'Invalid request method'})

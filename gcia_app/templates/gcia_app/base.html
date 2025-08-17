@@ -160,23 +160,26 @@
     <nav class="bg-black" id="sidebar">
         <a href="{% url 'home' %}"><img src="{% static 'gcia_app/images/gc-h-logo.png' %}" alt="Guardian Capital"></a>
         <ul class="nav">
-        <li class="nav-item">
-            <a href="{% url 'process_portfolio_valuation' %}" class="nav-link {% if request.resolver_match.url_name == 'process_portfolio_valuation' %}active{% endif %}">ECAS Portfolio</a>
-        </li>
-        <li class="nav-item">
-            <a href="{% url 'process_financial_planning' %}" class="nav-link {% if request.resolver_match.url_name == 'process_financial_planning' %}active{% endif %}">Financial Planning</a>
-        </li>
-        <li class="nav-item">
-            <a href="{% url 'upload_stock_data' %}" class="nav-link {% if request.resolver_match.url_name == 'upload_stock_data' %}active{% endif %}">Upload Stock Data</a>
-        </li>
-        {% if request.user.is_superuser %}
             <li class="nav-item">
-                <a href="{% url 'process_amcfs_nav_and_returns' %}" class="nav-link {% if request.resolver_match.url_name == 'process_amcfs_nav_and_returns' %}active{% endif %}">Upload Master Data</a>
+                <a href="{% url 'process_portfolio_valuation' %}" class="nav-link {% if request.resolver_match.url_name == 'process_portfolio_valuation' %}active{% endif %}">ECAS Portfolio</a>
             </li>
-        {% endif %}
-        <li class="nav-item">
-            <a href="{% url 'logout' %}" class="nav-link {% if request.resolver_match.url_name == 'logout' %}active{% endif %}">Logout</a>
-        </li>
+            <li class="nav-item">
+                <a href="{% url 'fund_analysis' %}" class="nav-link {% if request.resolver_match.url_name == 'fund_analysis' %}active{% endif %}">Fund Analysis</a>
+            </li>
+            <li class="nav-item">
+                <a href="{% url 'process_financial_planning' %}" class="nav-link {% if request.resolver_match.url_name == 'process_financial_planning' %}active{% endif %}">Financial Planning</a>
+            </li>
+            <li class="nav-item">
+                <a href="{% url 'upload_stock_data' %}" class="nav-link {% if request.resolver_match.url_name == 'upload_stock_data' %}active{% endif %}">Upload Stock Data</a>
+            </li>
+            {% if request.user.is_superuser %}
+                <li class="nav-item">
+                    <a href="{% url 'process_amcfs_nav_and_returns' %}" class="nav-link {% if request.resolver_match.url_name == 'process_amcfs_nav_and_returns' %}active{% endif %}">Upload Master Data</a>
+                </li>
+            {% endif %}
+            <li class="nav-item">
+                <a href="{% url 'logout' %}" class="nav-link {% if request.resolver_match.url_name == 'logout' %}active{% endif %}">Logout</a>
+            </li>
         </ul>
         
         
