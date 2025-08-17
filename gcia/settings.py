@@ -131,7 +131,7 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 STATIC_ROOT = os.path.join(BASE_DIR, 'static')
-STATICFILES_DIRS = [os.path.join(BASE_DIR, 'gcia_app', 'static')]
+STATICFILES_DIRS = [os.path.join(BASE_DIR, 'gcia_app', 'static'), os.path.join(BASE_DIR, 'template_files')]
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
@@ -268,3 +268,13 @@ LOGGING = {
 # Create logs directory
 LOGS_DIR = os.path.join(BASE_DIR, 'logs')
 os.makedirs(LOGS_DIR, exist_ok=True)
+
+# Template files directory (add this)
+TEMPLATE_FILES_DIR = os.path.join(BASE_DIR, 'template_files')
+
+# Create the directory if it doesn't exist
+os.makedirs(TEMPLATE_FILES_DIR, exist_ok=True)
+
+# Ensure temporary directory is available
+TEMP_DIR = os.path.join(BASE_DIR, 'temp')
+os.makedirs(TEMP_DIR, exist_ok=True)
