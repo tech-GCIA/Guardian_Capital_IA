@@ -1,69 +1,28 @@
 import os
 import tempfile
 from datetime import datetime, date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 import openpyxl
-from openpyxl import load_workbook
-from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, Alignment, PatternFill, Border, Side, NamedStyle
+from openpyxl.utils import get_column_letter
 from django.conf import settings
-from django.contrib.staticfiles.finders import find
 from gcia_app.models import Stock, StockQuarterlyData
 import logging
+import pandas as pd
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
 class FundReportGenerator:
     """
-    Generate Excel report based on selected stocks and template file
+    Generate Excel report by building from scratch based on sample structure
     """
     
     def __init__(self):
-        self.template_path = self._get_template_path()
         self.workbook = None
         self.sheets = {}
         
-    def _get_template_path(self):
-        """Get the path to the template Excel file"""
-        # List of possible template filenames (with and without extra spaces)
-        template_filenames = [
-            "Format  Mutual Fund Review Q4FY25.xlsm",  # Original with double space
-            "Format Mutual Fund Review Q4FY25.xlsm",   # Single space
-            "Format - Mutual Fund Review (Q4-FY-25).xlsm",  # Alternative format
-        ]
-        
-        for template_filename in template_filenames:
-            # Try base directory first (same as manage.py)
-            base_template_path = os.path.join(settings.BASE_DIR, template_filename)
-            if os.path.exists(base_template_path):
-                print(f"Found template file at: {base_template_path}")
-                return base_template_path
-            
-            # Try static files
-            template_path = find(f'gcia_app/templates/{template_filename}')
-            if template_path and os.path.exists(template_path):
-                print(f"Found template file at: {template_path}")
-                return template_path
-                
-            # Try media root
-            media_template_path = os.path.join(settings.MEDIA_ROOT, template_filename)
-            if os.path.exists(media_template_path):
-                print(f"Found template file at: {media_template_path}")
-                return media_template_path
-        
-        # List all files in base directory for debugging
-        base_files = []
-        try:
-            base_files = [f for f in os.listdir(settings.BASE_DIR) if f.endswith(('.xlsx', '.xlsm'))]
-        except:
-            pass
-            
-        error_msg = f"Template file not found. Searched for: {template_filenames}\n"
-        error_msg += f"Base directory: {settings.BASE_DIR}\n"
-        error_msg += f"Excel files in base directory: {base_files}\n"
-        error_msg += f"Media root: {getattr(settings, 'MEDIA_ROOT', 'Not set')}"
-        
-        raise FileNotFoundError(error_msg)
-    
     def generate_report(self, fund_name, selected_stocks):
         """
         Generate the complete Excel report
@@ -76,33 +35,25 @@ class FundReportGenerator:
             str: Path to the generated Excel file
         """
         try:
-            # Load the template
-            self.workbook = load_workbook(self.template_path, keep_vba=True)
+            # Create a new workbook from scratch
+            self.workbook = Workbook()
             
-            # Get all required sheets
-            self._load_sheets()
+            # Remove default sheet
+            if 'Sheet' in self.workbook.sheetnames:
+                self.workbook.remove(self.workbook['Sheet'])
             
-            # Remove App-Base Sheet from the output as it's not needed in the final report
-            if 'App-Base Sheet' in self.workbook.sheetnames:
-                self.workbook.remove(self.workbook['App-Base Sheet'])
-                logger.info("Removed App-Base Sheet from output - using database data instead")
-            
-            # Process selected stocks and get database data from Step 5.1
+            # Process selected stocks and get database data
             stock_data = self._process_selected_stocks(selected_stocks)
             
-            # Fill Portfolio Analysis sheet with DATABASE data (not template data)
-            self._fill_portfolio_analysis(stock_data)
-            
-            # Fill Stock Weights sheet with DATABASE data
-            self._fill_stock_weights(stock_data)
-            
-            # Fill Summary sheet with calculated statistics
-            self._fill_summary(fund_name, stock_data)
+            # Create sheets in order (matching sample file)
+            self._create_summary_sheet(fund_name, stock_data)
+            self._create_stock_weights_sheet(stock_data)
+            self._create_portfolio_analysis_sheet(stock_data)
             
             # Save the file
             output_path = self._save_report(fund_name)
             
-            logger.info(f"Report generated successfully using database data from {len(stock_data)} selected stocks")
+            logger.info(f"Report generated successfully for {fund_name} with {len(stock_data)} stocks")
             
             return output_path
             
@@ -110,40 +61,13 @@ class FundReportGenerator:
             logger.error(f"Error generating report: {str(e)}")
             raise
     
-    def _load_sheets(self):
-        """Load all required sheets from the workbook"""
-        required_sheets = ['App-Base Sheet', 'Portfolio Analysis', '2. Stock Weights', '1. Summary']
-        
-        for sheet_name in required_sheets:
-            if sheet_name in self.workbook.sheetnames:
-                self.sheets[sheet_name] = self.workbook[sheet_name]
-            else:
-                # Try alternative names
-                for ws_name in self.workbook.sheetnames:
-                    if 'portfolio' in ws_name.lower() and 'analysis' in ws_name.lower():
-                        self.sheets['Portfolio Analysis'] = self.workbook[ws_name]
-                    elif 'stock' in ws_name.lower() and 'weight' in ws_name.lower():
-                        self.sheets['2. Stock Weights'] = self.workbook[ws_name]
-                    elif 'summary' in ws_name.lower():
-                        self.sheets['1. Summary'] = self.workbook[ws_name]
-                    elif 'app' in ws_name.lower() and 'base' in ws_name.lower():
-                        self.sheets['App-Base Sheet'] = self.workbook[ws_name]
-        
-        logger.info(f"Loaded sheets: {list(self.sheets.keys())}")
-    
     def _process_selected_stocks(self, selected_stocks):
         """
-        Process selected stocks and get all required data from DATABASE (Step 5.1 data)
-        
-        Args:
-            selected_stocks (list): List of stock selections
-            
-        Returns:
-            list: Enhanced stock data with database information from Step 5.1 upload
+        Process selected stocks and get all required data from database
         """
         enhanced_data = []
         
-        logger.info(f"Processing {len(selected_stocks)} selected stocks using database data from Step 5.1")
+        logger.info(f"Processing {len(selected_stocks)} selected stocks")
         
         for stock_selection in selected_stocks:
             stock_id = stock_selection['id']
@@ -151,468 +75,708 @@ class FundReportGenerator:
             shares = int(stock_selection['shares'])
             
             try:
-                # Get stock from database (uploaded in Step 5.1)
+                # Get stock from database
                 stock = Stock.objects.get(stock_id=stock_id)
                 
-                # Get quarterly data for this stock (uploaded in Step 5.1)
+                # Get quarterly data for this stock
                 quarterly_data = StockQuarterlyData.objects.filter(
                     stock=stock
-                ).order_by('-quarter_year', '-quarter_number')[:20]  # Get more quarters for better analysis
+                ).order_by('-quarter_year', '-quarter_number')[:24]  # Get 6 years of data
                 
-                logger.info(f"Found {len(quarterly_data)} quarterly records for {stock.name} from database")
+                logger.info(f"Found {len(quarterly_data)} quarters for {stock.name}")
                 
-                # Calculate required metrics using DATABASE data
-                metrics = self._calculate_stock_metrics(stock, quarterly_data)
+                # Calculate all required metrics
+                metrics = self._calculate_comprehensive_metrics(stock, quarterly_data)
+                
+                # Extract accord code from symbol (STOCK_XXX -> XXX)
+                accord_code = stock.symbol.split('_')[-1] if '_' in stock.symbol else stock.symbol
                 
                 enhanced_data.append({
                     'stock': stock,
+                    'accord_code': accord_code,
                     'weightage': weightage,
                     'shares': shares,
-                    'quarterly_data': quarterly_data,
-                    'metrics': metrics,
-                    'data_source': 'database'  # Mark that this comes from Step 5.1 upload
+                    'quarterly_data': list(quarterly_data),
+                    'metrics': metrics
                 })
                 
-                logger.info(f"Successfully processed {stock.name} with {len(quarterly_data)} quarters of data")
-                
             except Stock.DoesNotExist:
-                logger.warning(f"Stock with ID {stock_id} not found in database - may need to upload stock data in Step 5.1")
+                logger.warning(f"Stock with ID {stock_id} not found in database")
                 continue
         
-        logger.info(f"Successfully processed {len(enhanced_data)} stocks using database data")
         return enhanced_data
     
-    def _calculate_stock_metrics(self, stock, quarterly_data):
+    def _calculate_comprehensive_metrics(self, stock, quarterly_data):
         """
-        Calculate all required metrics for a stock
+        Calculate all metrics required for the report
         """
         metrics = {}
-        
-        if not quarterly_data:
-            return self._get_empty_metrics()
-        
-        # Convert quarterly data to list for easier processing
         quarters = list(quarterly_data)
         
-        # Get current quarter data
-        current_quarter = quarters[0] if quarters else None
+        if not quarters:
+            return self._get_empty_metrics()
         
-        if current_quarter:
-            metrics['current_mcap'] = float(current_quarter.mcap or 0)
-            metrics['current_revenue'] = float(current_quarter.revenue or 0)
-            metrics['current_pat'] = float(current_quarter.pat or 0)
-            metrics['current_pe'] = float(current_quarter.pe_ratio or 0)
-            metrics['current_pb'] = float(current_quarter.pb_ratio or 0)
+        # Get latest quarter
+        current_q = quarters[0] if quarters else None
         
-        # Calculate QoQ (Quarter over Quarter) growth
+        # Basic metrics
+        metrics['mcap'] = float(current_q.mcap or 0) if current_q else 0
+        metrics['free_float'] = 75.0  # Default value, update if available in your model
+        
+        # Quarterly market caps for all quarters
+        metrics['quarterly_mcaps'] = {}
+        for q in quarters:
+            quarter_key = f"{q.quarter_year}Q{q.quarter_number}"
+            metrics['quarterly_mcaps'][quarter_key] = float(q.mcap or 0)
+        
+        # TTM metrics
+        metrics['ttm_revenue'] = float(current_q.revenue or 0) if current_q else 0
+        metrics['ttm_pat'] = float(current_q.pat or 0) if current_q else 0
+        
+        # Growth calculations
+        # QoQ Growth
         if len(quarters) >= 2:
-            current_pat = float(quarters[0].pat or 0)
-            previous_pat = float(quarters[1].pat or 0)
-            metrics['qoq_growth'] = ((current_pat - previous_pat) / previous_pat * 100) if previous_pat > 0 else 0
+            curr_pat = float(quarters[0].pat or 0)
+            prev_pat = float(quarters[1].pat or 0)
+            metrics['qoq_growth'] = ((curr_pat - prev_pat) / prev_pat * 100) if prev_pat > 0 else 0
         else:
             metrics['qoq_growth'] = 0
         
-        # Calculate YoY (Year over Year) growth
-        if len(quarters) >= 4:
-            current_pat = float(quarters[0].pat or 0)
-            year_ago_pat = float(quarters[3].pat or 0)
-            metrics['yoy_growth'] = ((current_pat - year_ago_pat) / year_ago_pat * 100) if year_ago_pat > 0 else 0
+        # YoY Growth
+        if len(quarters) >= 5:
+            curr_pat = float(quarters[0].pat or 0)
+            year_ago_pat = float(quarters[4].pat or 0)
+            metrics['yoy_growth'] = ((curr_pat - year_ago_pat) / year_ago_pat * 100) if year_ago_pat > 0 else 0
         else:
             metrics['yoy_growth'] = 0
         
-        # Calculate CAGR (6-year if available)
-        metrics['cagr_6yr'] = self._calculate_cagr(quarters, 6)
+        # 6-Year CAGR
+        if len(quarters) >= 24:
+            current_revenue = float(quarters[0].revenue or 0)
+            six_year_ago_revenue = float(quarters[23].revenue or 0)
+            if six_year_ago_revenue > 0:
+                metrics['cagr_6yr'] = (((current_revenue / six_year_ago_revenue) ** (1/6)) - 1) * 100
+            else:
+                metrics['cagr_6yr'] = 0
+        else:
+            metrics['cagr_6yr'] = 0
         
-        # Calculate PE statistics
-        metrics.update(self._calculate_pe_statistics(quarters))
+        # PE metrics
+        pe_values = [float(q.pe_ratio or 0) for q in quarters if q.pe_ratio and float(q.pe_ratio) > 0]
         
-        # Calculate Price-to-Book statistics
-        metrics.update(self._calculate_pb_statistics(quarters))
+        metrics['current_pe'] = float(current_q.pe_ratio or 0) if current_q else 0
         
-        # Calculate Alpha metrics
-        metrics.update(self._calculate_alpha_metrics(quarters))
+        # 2-Year and 5-Year Average PE
+        pe_2yr = pe_values[:8] if len(pe_values) >= 8 else pe_values
+        metrics['pe_2yr_avg'] = np.mean(pe_2yr) if pe_2yr else 0
+        
+        pe_5yr = pe_values[:20] if len(pe_values) >= 20 else pe_values
+        metrics['pe_5yr_avg'] = np.mean(pe_5yr) if pe_5yr else 0
+        
+        # PE Revaluation
+        if metrics['pe_2yr_avg'] > 0:
+            metrics['pe_reval_2yr'] = ((metrics['current_pe'] - metrics['pe_2yr_avg']) / metrics['pe_2yr_avg']) * 100
+        else:
+            metrics['pe_reval_2yr'] = 0
+            
+        if metrics['pe_5yr_avg'] > 0:
+            metrics['pe_reval_5yr'] = ((metrics['current_pe'] - metrics['pe_5yr_avg']) / metrics['pe_5yr_avg']) * 100
+        else:
+            metrics['pe_reval_5yr'] = 0
+        
+        # PB metrics
+        pb_values = [float(q.pb_ratio or 0) for q in quarters if q.pb_ratio and float(q.pb_ratio) > 0]
+        
+        metrics['current_pb'] = float(current_q.pb_ratio or 0) if current_q else 0
+        
+        pb_2yr = pb_values[:8] if len(pb_values) >= 8 else pb_values
+        metrics['pb_2yr_avg'] = np.mean(pb_2yr) if pb_2yr else 0
+        
+        pb_5yr = pb_values[:20] if len(pb_values) >= 20 else pb_values
+        metrics['pb_5yr_avg'] = np.mean(pb_5yr) if pb_5yr else 0
+        
+        # PB Revaluation
+        if metrics['pb_2yr_avg'] > 0:
+            metrics['pb_reval_2yr'] = ((metrics['current_pb'] - metrics['pb_2yr_avg']) / metrics['pb_2yr_avg']) * 100
+        else:
+            metrics['pb_reval_2yr'] = 0
+            
+        if metrics['pb_5yr_avg'] > 0:
+            metrics['pb_reval_5yr'] = ((metrics['current_pb'] - metrics['pb_5yr_avg']) / metrics['pb_5yr_avg']) * 100
+        else:
+            metrics['pb_reval_5yr'] = 0
+        
+        # 10 Quarter PB Low/High
+        pb_10q = pb_values[:10] if len(pb_values) >= 10 else pb_values
+        if pb_10q:
+            metrics['pb_10q_low'] = min(pb_10q)
+            metrics['pb_10q_high'] = max(pb_10q)
+        else:
+            metrics['pb_10q_low'] = 0
+            metrics['pb_10q_high'] = 0
+        
+        # Alpha calculations
+        bond_rate = 7.0
+        
+        if len(quarters) >= 8:
+            recent_pats = [float(q.pat or 0) for q in quarters[:4] if q.pat]
+            older_pats = [float(q.pat or 0) for q in quarters[4:8] if q.pat]
+            
+            if recent_pats and older_pats:
+                avg_recent = np.mean(recent_pats)
+                avg_older = np.mean(older_pats)
+                if avg_older > 0:
+                    annual_growth = ((avg_recent / avg_older) ** 0.25 - 1) * 100
+                    metrics['alpha_over_bond'] = annual_growth - bond_rate
+                    metrics['absolute_alpha'] = annual_growth
+                else:
+                    metrics['alpha_over_bond'] = 0
+                    metrics['absolute_alpha'] = 0
+            else:
+                metrics['alpha_over_bond'] = 0
+                metrics['absolute_alpha'] = 0
+        else:
+            metrics['alpha_over_bond'] = 0
+            metrics['absolute_alpha'] = 0
+        
+        # PE Yield
+        if metrics['current_pe'] > 0:
+            metrics['pe_yield'] = (1 / metrics['current_pe']) * 100
+        else:
+            metrics['pe_yield'] = 0
+        
+        metrics['growth_rate'] = metrics.get('yoy_growth', 0)
+        metrics['bond_rate'] = bond_rate
         
         return metrics
-    
-    def _calculate_cagr(self, quarters, years):
-        """Calculate Compound Annual Growth Rate"""
-        if len(quarters) < years * 4:  # Need at least years*4 quarters
-            return 0
-        
-        current_value = float(quarters[0].revenue or 0)
-        past_value = float(quarters[years * 4 - 1].revenue or 0)
-        
-        if past_value <= 0:
-            return 0
-        
-        cagr = ((current_value / past_value) ** (1/years) - 1) * 100
-        return round(cagr, 2)
-    
-    def _calculate_pe_statistics(self, quarters):
-        """Calculate PE-related statistics"""
-        pe_metrics = {}
-        
-        # Get PE ratios for calculations
-        pe_ratios = [float(q.pe_ratio or 0) for q in quarters if q.pe_ratio]
-        
-        if pe_ratios:
-            # Current PE
-            pe_metrics['current_pe'] = pe_ratios[0] if pe_ratios else 0
-            
-            # 2-year average PE (8 quarters)
-            two_year_pes = pe_ratios[:8] if len(pe_ratios) >= 8 else pe_ratios
-            pe_metrics['pe_2yr_avg'] = sum(two_year_pes) / len(two_year_pes) if two_year_pes else 0
-            
-            # 5-year average PE (20 quarters)
-            five_year_pes = pe_ratios[:20] if len(pe_ratios) >= 20 else pe_ratios
-            pe_metrics['pe_5yr_avg'] = sum(five_year_pes) / len(five_year_pes) if five_year_pes else 0
-            
-            # Revaluation/Devaluation percentages
-            if pe_metrics['pe_2yr_avg'] > 0:
-                pe_metrics['pe_reval_2yr'] = ((pe_metrics['current_pe'] - pe_metrics['pe_2yr_avg']) / pe_metrics['pe_2yr_avg'] * 100)
-            else:
-                pe_metrics['pe_reval_2yr'] = 0
-                
-            if pe_metrics['pe_5yr_avg'] > 0:
-                pe_metrics['pe_reval_5yr'] = ((pe_metrics['current_pe'] - pe_metrics['pe_5yr_avg']) / pe_metrics['pe_5yr_avg'] * 100)
-            else:
-                pe_metrics['pe_reval_5yr'] = 0
-        else:
-            pe_metrics = {
-                'current_pe': 0,
-                'pe_2yr_avg': 0,
-                'pe_5yr_avg': 0,
-                'pe_reval_2yr': 0,
-                'pe_reval_5yr': 0
-            }
-        
-        return pe_metrics
-    
-    def _calculate_pb_statistics(self, quarters):
-        """Calculate Price-to-Book related statistics"""
-        pb_metrics = {}
-        
-        # Get PB ratios for calculations
-        pb_ratios = [float(q.pb_ratio or 0) for q in quarters if q.pb_ratio]
-        
-        if pb_ratios:
-            # Current PB
-            pb_metrics['current_pb'] = pb_ratios[0] if pb_ratios else 0
-            
-            # 2-year average PB (8 quarters)
-            two_year_pbs = pb_ratios[:8] if len(pb_ratios) >= 8 else pb_ratios
-            pb_metrics['pb_2yr_avg'] = sum(two_year_pbs) / len(two_year_pbs) if two_year_pbs else 0
-            
-            # 5-year average PB (20 quarters)
-            five_year_pbs = pb_ratios[:20] if len(pb_ratios) >= 20 else pb_ratios
-            pb_metrics['pb_5yr_avg'] = sum(five_year_pbs) / len(five_year_pbs) if five_year_pbs else 0
-            
-            # Revaluation/Devaluation percentages
-            if pb_metrics['pb_2yr_avg'] > 0:
-                pb_metrics['pb_reval_2yr'] = ((pb_metrics['current_pb'] - pb_metrics['pb_2yr_avg']) / pb_metrics['pb_2yr_avg'] * 100)
-            else:
-                pb_metrics['pb_reval_2yr'] = 0
-                
-            if pb_metrics['pb_5yr_avg'] > 0:
-                pb_metrics['pb_reval_5yr'] = ((pb_metrics['current_pb'] - pb_metrics['pb_5yr_avg']) / pb_metrics['pb_5yr_avg'] * 100)
-            else:
-                pb_metrics['pb_reval_5yr'] = 0
-                
-            # 10 Quarter Low/High
-            ten_quarter_pbs = pb_ratios[:10] if len(pb_ratios) >= 10 else pb_ratios
-            pb_metrics['pb_10q_low'] = min(ten_quarter_pbs) if ten_quarter_pbs else 0
-            pb_metrics['pb_10q_high'] = max(ten_quarter_pbs) if ten_quarter_pbs else 0
-        else:
-            pb_metrics = {
-                'current_pb': 0,
-                'pb_2yr_avg': 0,
-                'pb_5yr_avg': 0,
-                'pb_reval_2yr': 0,
-                'pb_reval_5yr': 0,
-                'pb_10q_low': 0,
-                'pb_10q_high': 0
-            }
-        
-        return pb_metrics
-    
-    def _calculate_alpha_metrics(self, quarters):
-        """Calculate Alpha-related metrics"""
-        alpha_metrics = {}
-        
-        # For simplicity, using basic calculations
-        # In real implementation, you might want to compare against bond yields and market returns
-        
-        if quarters:
-            # Assuming 6% bond rate for calculations
-            bond_rate = 6.0
-            
-            # Calculate basic alpha (simplified)
-            returns = []
-            for i in range(len(quarters) - 1):
-                current_pat = float(quarters[i].pat or 0)
-                previous_pat = float(quarters[i+1].pat or 0)
-                if previous_pat > 0:
-                    returns.append((current_pat - previous_pat) / previous_pat * 100)
-            
-            avg_return = sum(returns) / len(returns) if returns else 0
-            alpha_metrics['alpha_over_bond'] = avg_return - bond_rate
-            alpha_metrics['absolute_alpha'] = avg_return
-            
-            # PE Yield (simplified as 1/PE * 100)
-            current_pe = float(quarters[0].pe_ratio or 0)
-            alpha_metrics['pe_yield'] = (1 / current_pe * 100) if current_pe > 0 else 0
-            
-        else:
-            alpha_metrics = {
-                'alpha_over_bond': 0,
-                'absolute_alpha': 0,
-                'pe_yield': 0
-            }
-        
-        alpha_metrics['growth_rate'] = alpha_metrics.get('absolute_alpha', 0)
-        alpha_metrics['bond_rate'] = 6.0  # Assumed bond rate
-        
-        return alpha_metrics
     
     def _get_empty_metrics(self):
         """Return empty metrics structure"""
         return {
-            'current_mcap': 0,
-            'current_revenue': 0,
-            'current_pat': 0,
-            'current_pe': 0,
-            'current_pb': 0,
-            'qoq_growth': 0,
-            'yoy_growth': 0,
-            'cagr_6yr': 0,
-            'pe_2yr_avg': 0,
-            'pe_5yr_avg': 0,
-            'pe_reval_2yr': 0,
-            'pe_reval_5yr': 0,
-            'pb_2yr_avg': 0,
-            'pb_5yr_avg': 0,
-            'pb_reval_2yr': 0,
-            'pb_reval_5yr': 0,
-            'pb_10q_low': 0,
-            'pb_10q_high': 0,
-            'alpha_over_bond': 0,
-            'absolute_alpha': 0,
-            'pe_yield': 0,
-            'growth_rate': 0,
-            'bond_rate': 6.0
+            'mcap': 0, 'free_float': 0, 'quarterly_mcaps': {},
+            'ttm_revenue': 0, 'ttm_pat': 0,
+            'qoq_growth': 0, 'yoy_growth': 0, 'cagr_6yr': 0,
+            'current_pe': 0, 'pe_2yr_avg': 0, 'pe_5yr_avg': 0,
+            'pe_reval_2yr': 0, 'pe_reval_5yr': 0,
+            'current_pb': 0, 'pb_2yr_avg': 0, 'pb_5yr_avg': 0,
+            'pb_reval_2yr': 0, 'pb_reval_5yr': 0,
+            'pb_10q_low': 0, 'pb_10q_high': 0,
+            'alpha_over_bond': 0, 'absolute_alpha': 0,
+            'pe_yield': 0, 'growth_rate': 0, 'bond_rate': 7.0
         }
     
-    def _safe_set_cell_value(self, sheet, cell_address, value):
-        """Safely set cell value, handling merged cells"""
-        try:
-            cell = sheet[cell_address]
-            
-            # Check if cell is part of a merged range
-            if hasattr(cell, 'coordinate') and sheet.merged_cells:
-                for merged_range in sheet.merged_cells.ranges:
-                    if cell.coordinate in merged_range:
-                        # This cell is part of a merged range, skip it
-                        logger.warning(f"Skipping merged cell {cell_address}")
-                        return False
-            
-            # Set the value
-            cell.value = value
-            return True
-            
-        except AttributeError as e:
-            if "'MergedCell' object attribute 'value' is read-only" in str(e):
-                logger.warning(f"Cannot write to merged cell {cell_address}, skipping")
-                return False
-            else:
-                logger.error(f"Error setting cell {cell_address}: {str(e)}")
-                return False
-        except Exception as e:
-            logger.error(f"Unexpected error setting cell {cell_address}: {str(e)}")
-            return False
-    
-    def _find_data_start_row(self, sheet):
-        """Find the appropriate starting row for data entry"""
-        # Look for common header patterns to determine where data should start
-        for row_num in range(1, 20):  # Check first 20 rows
-            try:
-                cell_value = sheet[f'A{row_num}'].value
-                if cell_value and isinstance(cell_value, str):
-                    cell_value_lower = cell_value.lower()
-                    # Look for header-like content
-                    if any(keyword in cell_value_lower for keyword in ['stock', 'company', 'name', 'symbol', 'security']):
-                        return row_num + 1  # Return next row after header
-            except:
-                continue
+    def _create_portfolio_analysis_sheet(self, stock_data):
+        """
+        Create Portfolio Analysis sheet from scratch with proper structure
+        """
+        ws = self.workbook.create_sheet(title="3. Portfolio Analysis")
         
-        # Default fallback - start from row 5 if no header found
-        return 5
-    
-    def _fill_portfolio_analysis(self, stock_data):
-        """Fill the Portfolio Analysis sheet with safe cell writing"""
-        if 'Portfolio Analysis' not in self.sheets:
-            logger.warning("Portfolio Analysis sheet not found")
-            return
+        # Define styles
+        header_style = self._get_header_style()
+        data_style = self._get_data_style()
+        total_style = self._get_total_style()
         
-        sheet = self.sheets['Portfolio Analysis']
+        # Headers (based on Old Bridge sample structure)
+        # Row 8: Category headers
+        category_headers = [
+            ('A8', 'Stock Details'),
+            ('F8', 'Market Data'),
+            ('K8', 'Growth Metrics'),
+            ('O8', 'PE Analysis'),
+            ('U8', 'PB Analysis'),
+            ('AB8', 'Alpha Metrics'),
+        ]
         
-        # Find the starting row for data by looking for headers or existing data
-        start_row = self._find_data_start_row(sheet)
+        for cell_ref, header in category_headers:
+            ws[cell_ref] = header
+            ws[cell_ref].font = Font(bold=True, size=11)
+            ws.merge_cells(f'{cell_ref[0]}8:{chr(ord(cell_ref[0])+3)}8')
         
-        logger.info(f"Starting to fill portfolio analysis from row {start_row}")
+        # Row 9: Column headers
+        headers = [
+            'S.No', 'Company Name', 'Accord Code', 'Sector', 'Cap',  # A-E
+            'Free Float', 'Weightage (%)', 'No. of Shares', 'Market Cap (Cr)', 'TTM PAT',  # F-J
+            'QoQ (%)', 'YoY (%)', '6Y CAGR (%)', '',  # K-N
+            'Current PE', '2Y Avg PE', '5Y Avg PE', 'PE Reval 2Y (%)', 'PE Reval 5Y (%)', '',  # O-T
+            'Current PB', '2Y Avg PB', '5Y Avg PB', 'PB Reval 2Y (%)', 'PB Reval 5Y (%)',  # U-Y
+            '10Q PB Low', '10Q PB High', '',  # Z-AB
+            'Alpha/Bond', 'Abs Alpha', 'PE Yield', 'Growth', 'Bond Rate'  # AC-AG
+        ]
+        
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=9, column=col_idx, value=header)
+            cell.font = Font(bold=True, size=10)
+            cell.alignment = Alignment(horizontal='center', vertical='center')
+            cell.fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+        
+        # Fill stock data starting from row 10
+        start_row = 10
+        total_mcap = 0
+        total_weightage = 0
         
         for idx, stock_info in enumerate(stock_data):
             row = start_row + idx
             stock = stock_info['stock']
             metrics = stock_info['metrics']
             
-            logger.info(f"Processing stock {idx + 1}: {stock.name} at row {row}")
+            # Fill row data
+            row_data = [
+                idx + 1,  # S.No
+                stock.name,  # Company Name
+                stock_info['accord_code'],  # Accord Code
+                stock.sector or '-',  # Sector
+                stock.market_cap_category or '-',  # Cap
+                round(metrics['free_float'], 1),  # Free Float
+                round(stock_info['weightage'], 2),  # Weightage
+                stock_info['shares'],  # No. of Shares
+                round(metrics['mcap'], 2),  # Market Cap
+                round(metrics['ttm_pat'], 2),  # TTM PAT
+                round(metrics['qoq_growth'], 2),  # QoQ
+                round(metrics['yoy_growth'], 2),  # YoY
+                round(metrics['cagr_6yr'], 2),  # 6Y CAGR
+                '',  # Empty column
+                round(metrics['current_pe'], 2),  # Current PE
+                round(metrics['pe_2yr_avg'], 2),  # 2Y Avg PE
+                round(metrics['pe_5yr_avg'], 2),  # 5Y Avg PE
+                round(metrics['pe_reval_2yr'], 2),  # PE Reval 2Y
+                round(metrics['pe_reval_5yr'], 2),  # PE Reval 5Y
+                '',  # Empty column
+                round(metrics['current_pb'], 2),  # Current PB
+                round(metrics['pb_2yr_avg'], 2),  # 2Y Avg PB
+                round(metrics['pb_5yr_avg'], 2),  # 5Y Avg PB
+                round(metrics['pb_reval_2yr'], 2),  # PB Reval 2Y
+                round(metrics['pb_reval_5yr'], 2),  # PB Reval 5Y
+                round(metrics['pb_10q_low'], 2),  # 10Q PB Low
+                round(metrics['pb_10q_high'], 2),  # 10Q PB High
+                '',  # Empty column
+                round(metrics['alpha_over_bond'], 2),  # Alpha/Bond
+                round(metrics['absolute_alpha'], 2),  # Abs Alpha
+                round(metrics['pe_yield'], 2),  # PE Yield
+                round(metrics['growth_rate'], 2),  # Growth
+                round(metrics['bond_rate'], 2),  # Bond Rate
+            ]
             
-            try:
-                # Fill stock information - use safe cell writing
-                self._safe_set_cell_value(sheet, f'A{row}', stock.name)  # Stock Name
-                self._safe_set_cell_value(sheet, f'B{row}', stock.symbol)  # Stock Symbol
-                self._safe_set_cell_value(sheet, f'C{row}', stock_info['weightage'])  # Weightage
-                self._safe_set_cell_value(sheet, f'D{row}', stock_info['shares'])  # Number of Shares
-                
-                # Fill calculated metrics
-                self._safe_set_cell_value(sheet, f'E{row}', metrics['current_mcap'])  # Market Cap
-                self._safe_set_cell_value(sheet, f'F{row}', metrics['current_pat'])  # PAT
-                self._safe_set_cell_value(sheet, f'G{row}', metrics['qoq_growth'])  # QoQ Growth
-                self._safe_set_cell_value(sheet, f'H{row}', metrics['yoy_growth'])  # YoY Growth
-                self._safe_set_cell_value(sheet, f'I{row}', metrics['cagr_6yr'])  # 6-Year CAGR
-                
-                # PE Statistics
-                self._safe_set_cell_value(sheet, f'J{row}', metrics['current_pe'])  # Current PE
-                self._safe_set_cell_value(sheet, f'K{row}', metrics['pe_2yr_avg'])  # 2-Year Avg PE
-                self._safe_set_cell_value(sheet, f'L{row}', metrics['pe_5yr_avg'])  # 5-Year Avg PE
-                self._safe_set_cell_value(sheet, f'M{row}', metrics['pe_reval_2yr'])  # PE Reval 2-Year
-                self._safe_set_cell_value(sheet, f'N{row}', metrics['pe_reval_5yr'])  # PE Reval 5-Year
-                
-                # PB Statistics
-                self._safe_set_cell_value(sheet, f'O{row}', metrics['current_pb'])  # Current PB
-                self._safe_set_cell_value(sheet, f'P{row}', metrics['pb_2yr_avg'])  # 2-Year Avg PB
-                self._safe_set_cell_value(sheet, f'Q{row}', metrics['pb_5yr_avg'])  # 5-Year Avg PB
-                self._safe_set_cell_value(sheet, f'R{row}', metrics['pb_reval_2yr'])  # PB Reval 2-Year
-                self._safe_set_cell_value(sheet, f'S{row}', metrics['pb_reval_5yr'])  # PB Reval 5-Year
-                self._safe_set_cell_value(sheet, f'T{row}', metrics['pb_10q_low'])  # 10Q PB Low
-                self._safe_set_cell_value(sheet, f'U{row}', metrics['pb_10q_high'])  # 10Q PB High
-                
-                # Alpha Metrics
-                self._safe_set_cell_value(sheet, f'V{row}', metrics['alpha_over_bond'])  # Alpha over Bond
-                self._safe_set_cell_value(sheet, f'W{row}', metrics['absolute_alpha'])  # Absolute Alpha
-                self._safe_set_cell_value(sheet, f'X{row}', metrics['pe_yield'])  # PE Yield
-                self._safe_set_cell_value(sheet, f'Y{row}', metrics['growth_rate'])  # Growth Rate
-                self._safe_set_cell_value(sheet, f'Z{row}', metrics['bond_rate'])  # Bond Rate
-                
-                logger.info(f"Successfully filled data for {stock.name}")
-                
-            except Exception as e:
-                logger.error(f"Error filling data for stock {stock.name} at row {row}: {str(e)}")
-                continue
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws.cell(row=row, column=col_idx, value=value)
+                if col_idx in [7, 9, 10, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22, 23, 24, 25, 26, 27, 29, 30, 31, 32, 33]:
+                    # Numeric columns - align right
+                    cell.alignment = Alignment(horizontal='right')
+                else:
+                    cell.alignment = Alignment(horizontal='left')
+            
+            # Accumulate totals
+            total_mcap += metrics['mcap'] * stock_info['weightage'] / 100
+            total_weightage += stock_info['weightage']
+        
+        # Add TOTAL row
+        total_row = start_row + len(stock_data)
+        ws.cell(row=total_row, column=2, value="TOTAL")
+        ws.cell(row=total_row, column=2).font = Font(bold=True)
+        
+        # Total weightage
+        ws.cell(row=total_row, column=7, value=round(total_weightage, 2))
+        ws.cell(row=total_row, column=7).font = Font(bold=True)
+        
+        # Weighted average market cap
+        ws.cell(row=total_row, column=9, value=round(total_mcap, 2))
+        ws.cell(row=total_row, column=9).font = Font(bold=True)
+        
+        # Calculate weighted averages for other metrics
+        if stock_data and total_weightage > 0:
+            weighted_pe = sum(s['metrics']['current_pe'] * s['weightage'] / total_weightage for s in stock_data)
+            weighted_pb = sum(s['metrics']['current_pb'] * s['weightage'] / total_weightage for s in stock_data)
+            
+            ws.cell(row=total_row, column=15, value=round(weighted_pe, 2))
+            ws.cell(row=total_row, column=15).font = Font(bold=True)
+            
+            ws.cell(row=total_row, column=21, value=round(weighted_pb, 2))
+            ws.cell(row=total_row, column=21).font = Font(bold=True)
+        
+        # Add borders to the data range
+        self._add_borders(ws, 9, total_row, 1, 33)
+        
+        # Adjust column widths
+        column_widths = {
+            'A': 8, 'B': 30, 'C': 12, 'D': 15, 'E': 10,
+            'F': 10, 'G': 12, 'H': 12, 'I': 15, 'J': 12,
+            'K': 10, 'L': 10, 'M': 10, 'N': 5,
+            'O': 12, 'P': 12, 'Q': 12, 'R': 15, 'S': 15, 'T': 5,
+            'U': 12, 'V': 12, 'W': 12, 'X': 15, 'Y': 15,
+            'Z': 12, 'AA': 12, 'AB': 5,
+            'AC': 12, 'AD': 12, 'AE': 10, 'AF': 10, 'AG': 10
+        }
+        
+        for col_letter, width in column_widths.items():
+            ws.column_dimensions[col_letter].width = width
+        
+        logger.info(f"Created Portfolio Analysis sheet with {len(stock_data)} stocks")
     
-    def _fill_stock_weights(self, stock_data):
-        """Fill the Stock Weights sheet"""
-        if '2. Stock Weights' not in self.sheets:
-            logger.warning("Stock Weights sheet not found")
-            return
+    def _create_stock_weights_sheet(self, stock_data):
+        """
+        Create Stock Weights sheet from scratch
+        """
+        ws = self.workbook.create_sheet(title="2. Stock Weights", index=0)
         
-        sheet = self.sheets['2. Stock Weights']
+        # Title
+        ws['A1'] = "Stock Weights Analysis"
+        ws['A1'].font = Font(bold=True, size=14)
+        ws.merge_cells('A1:K1')
         
-        # This sheet typically contains quarter-wise weights calculation
-        # Fill based on the quarterly data of selected stocks
-        
-        # Get all unique quarters from the stock data
+        # Get all unique quarters from stock data
         all_quarters = set()
         for stock_info in stock_data:
-            for quarter_data in stock_info['quarterly_data']:
-                quarter_key = f"Q{quarter_data.quarter_number}-{quarter_data.quarter_year}"
-                all_quarters.add((quarter_data.quarter_year, quarter_data.quarter_number, quarter_key))
+            for q in stock_info['quarterly_data']:
+                q_key = f"Q{q.quarter_number} {q.quarter_year}"
+                all_quarters.add((q.quarter_year, q.quarter_number, q_key))
         
-        # Sort quarters by year and quarter number (most recent first)
-        sorted_quarters = sorted(all_quarters, key=lambda x: (x[0], x[1]), reverse=True)
+        # Sort quarters (most recent first)
+        sorted_quarters = sorted(all_quarters, key=lambda x: (x[0], x[1]), reverse=True)[:12]  # Last 12 quarters
         
-        # Fill quarter headers (starting from column B)
-        for idx, (year, quarter, quarter_key) in enumerate(sorted_quarters[:10]):  # Limit to 10 quarters
-            col_idx = idx + 2  # Start from column B (index 2)
-            if col_idx <= 26:  # Limit to Z column
-                col_letter = chr(ord('A') + col_idx - 1)
-                self._safe_set_cell_value(sheet, f'{col_letter}1', quarter_key)
+        # Headers
+        ws['A4'] = "S.No"
+        ws['B4'] = "Stock Name"
+        ws['C4'] = "Current Weight (%)"
         
-        # Fill stock weights for each quarter
-        start_row = 2
-        for stock_idx, stock_info in enumerate(stock_data):
-            row = start_row + stock_idx
-            stock = stock_info['stock']
+        # Quarter headers
+        for idx, (year, qtr, label) in enumerate(sorted_quarters):
+            col = 4 + idx  # Start from column D
+            ws.cell(row=4, column=col, value=label)
+        
+        # Apply header formatting
+        for col in range(1, 4 + len(sorted_quarters)):
+            cell = ws.cell(row=4, column=col)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+            cell.alignment = Alignment(horizontal='center')
+        
+        # Fill stock data
+        start_row = 5
+        for idx, stock_info in enumerate(stock_data):
+            row = start_row + idx
             
-            self._safe_set_cell_value(sheet, f'A{row}', stock.name)  # Stock name in first column
+            ws.cell(row=row, column=1, value=idx + 1)  # S.No
+            ws.cell(row=row, column=2, value=stock_info['stock'].name)  # Stock Name
+            ws.cell(row=row, column=3, value=round(stock_info['weightage'], 2))  # Current Weight
             
-            # Fill weights for each quarter
-            for quarter_idx, (year, quarter, quarter_key) in enumerate(sorted_quarters[:10]):
-                col_idx = quarter_idx + 2
-                if col_idx <= 26:
-                    col_letter = chr(ord('A') + col_idx - 1)
-                    
-                    # Find the quarter data for this stock
-                    quarter_data = None
-                    for qd in stock_info['quarterly_data']:
-                        if qd.quarter_year == year and qd.quarter_number == quarter:
-                            quarter_data = qd
-                            break
-                    
-                    if quarter_data and quarter_data.mcap:
-                        # Calculate weight as percentage of total market cap
-                        weight = stock_info['weightage']  # Use entered weightage
-                        self._safe_set_cell_value(sheet, f'{col_letter}{row}', weight)
-                    else:
-                        self._safe_set_cell_value(sheet, f'{col_letter}{row}', 0)
+            # Fill quarter-wise weights based on market cap proportions
+            for q_idx, (year, qtr, label) in enumerate(sorted_quarters):
+                col = 4 + q_idx
+                
+                # Find the quarter data for this stock
+                quarter_key = f"{year}Q{qtr}"
+                if quarter_key in stock_info['metrics']['quarterly_mcaps']:
+                    # Use the same weightage for historical quarters (simplified)
+                    # In reality, you might calculate based on historical portfolio composition
+                    ws.cell(row=row, column=col, value=round(stock_info['weightage'], 2))
+                else:
+                    ws.cell(row=row, column=col, value=0)
+        
+        # Add TOTAL row
+        total_row = start_row + len(stock_data)
+        ws.cell(row=total_row, column=2, value="TOTAL")
+        ws.cell(row=total_row, column=2).font = Font(bold=True)
+        
+        # Calculate totals
+        total_weight = sum(s['weightage'] for s in stock_data)
+        ws.cell(row=total_row, column=3, value=round(total_weight, 2))
+        ws.cell(row=total_row, column=3).font = Font(bold=True)
+        
+        # Calculate quarter totals
+        for q_idx in range(len(sorted_quarters)):
+            col = 4 + q_idx
+            col_total = 0
+            for i in range(len(stock_data)):
+                cell_value = ws.cell(row=start_row + i, column=col).value
+                if cell_value:
+                    col_total += cell_value
+            ws.cell(row=total_row, column=col, value=round(col_total, 2))
+            ws.cell(row=total_row, column=col).font = Font(bold=True)
+        
+        # Add borders
+        self._add_borders(ws, 4, total_row, 1, 3 + len(sorted_quarters))
+        
+        # Adjust column widths
+        ws.column_dimensions['A'].width = 8
+        ws.column_dimensions['B'].width = 30
+        ws.column_dimensions['C'].width = 15
+        for idx in range(len(sorted_quarters)):
+            col_letter = get_column_letter(4 + idx)
+            ws.column_dimensions[col_letter].width = 12
+        
+        logger.info(f"Created Stock Weights sheet with {len(stock_data)} stocks and {len(sorted_quarters)} quarters")
     
-    def _fill_summary(self, fund_name, stock_data):
-        """Fill the Summary sheet"""
-        if '1. Summary' not in self.sheets:
-            logger.warning("Summary sheet not found")
-            return
+    def _create_summary_sheet(self, fund_name, stock_data):
+        """
+        Create Summary sheet from scratch
+        """
+        ws = self.workbook.create_sheet(title="1. Summary", index=0)
         
-        sheet = self.sheets['1. Summary']
+        # Title
+        ws['A1'] = f"Portfolio Summary - {fund_name}"
+        ws['A1'].font = Font(bold=True, size=16)
+        ws.merge_cells('A1:E1')
         
-        # Add fund name
-        self._safe_set_cell_value(sheet, 'B1', fund_name)
-        self._safe_set_cell_value(sheet, 'B2', f"Generated on {datetime.now().strftime('%Y-%m-%d')}")
+        ws['A2'] = f"Report Date: {datetime.now().strftime('%Y-%m-%d')}"
+        ws['A2'].font = Font(italic=True, size=10)
         
-        # Calculate summary statistics
+        # Calculate summary metrics
         total_stocks = len(stock_data)
-        total_weightage = sum(stock_info['weightage'] for stock_info in stock_data)
+        total_weightage = sum(s['weightage'] for s in stock_data)
         
-        # Calculate average metrics
         if stock_data:
-            avg_pe = sum(stock_info['metrics']['current_pe'] for stock_info in stock_data) / total_stocks
-            avg_pb = sum(stock_info['metrics']['current_pb'] for stock_info in stock_data) / total_stocks
-            avg_mcap = sum(stock_info['metrics']['current_mcap'] for stock_info in stock_data) / total_stocks
-            avg_cagr = sum(stock_info['metrics']['cagr_6yr'] for stock_info in stock_data) / total_stocks
+            # Weighted metrics
+            weighted_pe = sum(s['metrics']['current_pe'] * s['weightage'] / 100 for s in stock_data)
+            weighted_pb = sum(s['metrics']['current_pb'] * s['weightage'] / 100 for s in stock_data)
+            weighted_mcap = sum(s['metrics']['mcap'] * s['weightage'] / 100 for s in stock_data)
             
-            # Fill summary values (adjust cell references based on template)
-            self._safe_set_cell_value(sheet, 'B5', total_stocks)  # Total number of stocks
-            self._safe_set_cell_value(sheet, 'B6', total_weightage)  # Total weightage
-            self._safe_set_cell_value(sheet, 'B7', round(avg_pe, 2))  # Average PE
-            self._safe_set_cell_value(sheet, 'B8', round(avg_pb, 2))  # Average PB
-            self._safe_set_cell_value(sheet, 'B9', round(avg_mcap, 2))  # Average Market Cap
-            self._safe_set_cell_value(sheet, 'B10', round(avg_cagr, 2))  # Average CAGR
+            # Simple averages
+            avg_cagr = np.mean([s['metrics']['cagr_6yr'] for s in stock_data])
+            avg_yoy = np.mean([s['metrics']['yoy_growth'] for s in stock_data])
+            avg_qoq = np.mean([s['metrics']['qoq_growth'] for s in stock_data])
+            avg_alpha = np.mean([s['metrics']['alpha_over_bond'] for s in stock_data])
+            avg_pe_yield = np.mean([s['metrics']['pe_yield'] for s in stock_data])
+            
+            # Risk metrics
+            pe_values = [s['metrics']['current_pe'] for s in stock_data if s['metrics']['current_pe'] > 0]
+            pe_std = np.std(pe_values) if pe_values else 0
+            
+            # Sector allocation
+            sector_allocation = {}
+            for stock_info in stock_data:
+                sector = stock_info['stock'].sector or 'Others'
+                if sector not in sector_allocation:
+                    sector_allocation[sector] = 0
+                sector_allocation[sector] += stock_info['weightage']
+        else:
+            weighted_pe = weighted_pb = weighted_mcap = 0
+            avg_cagr = avg_yoy = avg_qoq = avg_alpha = avg_pe_yield = 0
+            pe_std = 0
+            sector_allocation = {}
+        
+        # Portfolio Overview Section
+        ws['A4'] = "PORTFOLIO OVERVIEW"
+        ws['A4'].font = Font(bold=True, size=12)
+        ws.merge_cells('A4:C4')
+        
+        overview_data = [
+            ("Total Holdings", total_stocks, ""),
+            ("Total Weightage (%)", round(total_weightage, 2), "%"),
+            ("Weighted Market Cap (Cr)", round(weighted_mcap, 2), "Cr"),
+        ]
+        
+        for idx, (label, value, suffix) in enumerate(overview_data):
+            row = 5 + idx
+            ws[f'A{row}'] = label
+            ws[f'B{row}'] = value
+            ws[f'C{row}'] = suffix
+        
+        # Valuation Metrics Section
+        ws['A9'] = "VALUATION METRICS"
+        ws['A9'].font = Font(bold=True, size=12)
+        ws.merge_cells('A9:C9')
+        
+        valuation_data = [
+            ("Portfolio PE", round(weighted_pe, 2), ""),
+            ("Portfolio PB", round(weighted_pb, 2), ""),
+            ("PE Yield (%)", round(avg_pe_yield, 2), "%"),
+            ("PE Std Deviation", round(pe_std, 2), ""),
+        ]
+        
+        for idx, (label, value, suffix) in enumerate(valuation_data):
+            row = 10 + idx
+            ws[f'A{row}'] = label
+            ws[f'B{row}'] = value
+            ws[f'C{row}'] = suffix
+        
+        # Growth Metrics Section
+        ws['A15'] = "GROWTH METRICS"
+        ws['A15'].font = Font(bold=True, size=12)
+        ws.merge_cells('A15:C15')
+        
+        growth_data = [
+            ("Average 6Y CAGR (%)", round(avg_cagr, 2), "%"),
+            ("Average YoY Growth (%)", round(avg_yoy, 2), "%"),
+            ("Average QoQ Growth (%)", round(avg_qoq, 2), "%"),
+            ("Average Alpha over Bond", round(avg_alpha, 2), "%"),
+        ]
+        
+        for idx, (label, value, suffix) in enumerate(growth_data):
+            row = 16 + idx
+            ws[f'A{row}'] = label
+            ws[f'B{row}'] = value
+            ws[f'C{row}'] = suffix
+        
+        # Top Holdings Section (right side)
+        ws['E4'] = "TOP HOLDINGS"
+        ws['E4'].font = Font(bold=True, size=12)
+        ws.merge_cells('E4:H4')
+        
+        ws['E5'] = "Stock Name"
+        ws['F5'] = "Weight (%)"
+        ws['G5'] = "PE"
+        ws['H5'] = "YoY (%)"
+        
+        for col in ['E5', 'F5', 'G5', 'H5']:
+            ws[col].font = Font(bold=True)
+            ws[col].fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+        
+        # Sort stocks by weightage
+        sorted_stocks = sorted(stock_data, key=lambda x: x['weightage'], reverse=True)[:10]
+        
+        for idx, stock_info in enumerate(sorted_stocks):
+            row = 6 + idx
+            ws[f'E{row}'] = stock_info['stock'].name[:25]  # Truncate long names
+            ws[f'F{row}'] = round(stock_info['weightage'], 2)
+            ws[f'G{row}'] = round(stock_info['metrics']['current_pe'], 2)
+            ws[f'H{row}'] = round(stock_info['metrics']['yoy_growth'], 2)
+        
+        # Sector Allocation Section
+        ws['E17'] = "SECTOR ALLOCATION"
+        ws['E17'].font = Font(bold=True, size=12)
+        ws.merge_cells('E17:G17')
+        
+        ws['E18'] = "Sector"
+        ws['F18'] = "Weight (%)"
+        ws['G18'] = "# Stocks"
+        
+        for col in ['E18', 'F18', 'G18']:
+            ws[col].font = Font(bold=True)
+            ws[col].fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+        
+        # Calculate sector counts
+        sector_counts = {}
+        for stock_info in stock_data:
+            sector = stock_info['stock'].sector or 'Others'
+            if sector not in sector_counts:
+                sector_counts[sector] = 0
+            sector_counts[sector] += 1
+        
+        # Sort sectors by allocation
+        sorted_sectors = sorted(sector_allocation.items(), key=lambda x: x[1], reverse=True)
+        
+        for idx, (sector, weight) in enumerate(sorted_sectors[:8]):  # Top 8 sectors
+            row = 19 + idx
+            ws[f'E{row}'] = sector[:20]  # Truncate long sector names
+            ws[f'F{row}'] = round(weight, 2)
+            ws[f'G{row}'] = sector_counts.get(sector, 0)
+        
+        # Add borders to sections
+        self._add_borders(ws, 5, 7, 1, 3)   # Portfolio Overview
+        self._add_borders(ws, 10, 13, 1, 3)  # Valuation Metrics
+        self._add_borders(ws, 16, 19, 1, 3)  # Growth Metrics
+        self._add_borders(ws, 5, 15, 5, 8)   # Top Holdings
+        self._add_borders(ws, 18, 18 + len(sorted_sectors[:8]), 5, 7)  # Sector Allocation
+        
+        # Adjust column widths
+        ws.column_dimensions['A'].width = 25
+        ws.column_dimensions['B'].width = 12
+        ws.column_dimensions['C'].width = 8
+        ws.column_dimensions['D'].width = 3
+        ws.column_dimensions['E'].width = 25
+        ws.column_dimensions['F'].width = 12
+        ws.column_dimensions['G'].width = 10
+        ws.column_dimensions['H'].width = 10
+        
+        # Add Key Insights Section at the bottom
+        ws['A22'] = "KEY INSIGHTS"
+        ws['A22'].font = Font(bold=True, size=12)
+        ws.merge_cells('A22:H22')
+        
+        insights = []
+        
+        # Generate insights based on metrics
+        if weighted_pe > 25:
+            insights.append("• Portfolio is trading at premium valuations (PE > 25)")
+        elif weighted_pe < 15:
+            insights.append("• Portfolio appears to be attractively valued (PE < 15)")
+        
+        if avg_cagr > 15:
+            insights.append("• Strong historical growth with 6Y CAGR > 15%")
+        
+        if total_weightage < 100:
+            insights.append(f"• Portfolio has {round(100 - total_weightage, 2)}% cash/unallocated")
+        
+        if len(sorted_sectors) == 1:
+            insights.append("• Portfolio is concentrated in a single sector")
+        elif len(sorted_sectors) > 5:
+            insights.append("• Well-diversified portfolio across multiple sectors")
+        
+        if avg_alpha > 0:
+            insights.append(f"• Portfolio generating positive alpha of {round(avg_alpha, 2)}% over bond rate")
+        
+        for idx, insight in enumerate(insights[:5]):  # Limit to 5 insights
+            ws[f'A{23 + idx}'] = insight
+            ws[f'A{23 + idx}'].font = Font(size=10)
+        
+        logger.info(f"Created Summary sheet with {total_stocks} stocks and {len(sorted_sectors)} sectors")
+    
+    def _get_header_style(self):
+        """Get header cell style"""
+        style = NamedStyle(name="header")
+        style.font = Font(bold=True, size=11)
+        style.fill = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
+        style.alignment = Alignment(horizontal='center', vertical='center')
+        style.border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        return style
+    
+    def _get_data_style(self):
+        """Get data cell style"""
+        style = NamedStyle(name="data")
+        style.font = Font(size=10)
+        style.alignment = Alignment(horizontal='left', vertical='center')
+        style.border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        return style
+    
+    def _get_total_style(self):
+        """Get total row style"""
+        style = NamedStyle(name="total")
+        style.font = Font(bold=True, size=11)
+        style.fill = PatternFill(start_color="E6E6E6", end_color="E6E6E6", fill_type="solid")
+        style.alignment = Alignment(horizontal='right', vertical='center')
+        style.border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='double'),
+            bottom=Side(style='double')
+        )
+        return style
+    
+    def _add_borders(self, ws, start_row, end_row, start_col, end_col):
+        """Add borders to a range of cells"""
+        thin = Side(style='thin')
+        
+        for row in range(start_row, end_row + 1):
+            for col in range(start_col, end_col + 1):
+                cell = ws.cell(row=row, column=col)
+                if not cell.border:
+                    cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
     
     def _save_report(self, fund_name):
         """Save the generated report"""
-        # Create filename
+        # Create filename - IMPORTANT: Use .xlsx extension for regular Excel files
         safe_fund_name = "".join(c for c in fund_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
         safe_fund_name = safe_fund_name.replace(' ', '_')
         current_date = datetime.now().strftime('%Y%m%d')
-        filename = f"{safe_fund_name}_Analysis_file_{current_date}.xlsm"  # Keep .xlsm extension to preserve macros
+        filename = f"{safe_fund_name}_MF_Analysis_{current_date}.xlsx"  # Changed to .xlsx
         
         # Create temporary file
         temp_dir = tempfile.gettempdir()
         output_path = os.path.join(temp_dir, filename)
         
-        # Save the workbook with proper format
+        # Save the workbook as .xlsx format
         try:
             self.workbook.save(output_path)
-            logger.info(f"Excel file saved successfully: {output_path}")
+            logger.info(f"Excel file saved successfully as .xlsx: {output_path}")
         except Exception as e:
             logger.error(f"Error saving Excel file: {str(e)}")
             raise
