@@ -67,10 +67,84 @@ class CustomerAdmin(admin.ModelAdmin):
         
 class AMCFundSchemeAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
     search_fields = ['name']
-    list_display = ('amcfundscheme_id', 'name', 'isin_number', 'scheme_benchmark', 'is_active', 'latest_nav', 'latest_nav_as_on_date')
+    list_display = ('amcfundscheme_id', 'name', 'isin_number', 'scheme_benchmark', 'is_active', 'holdings_count', 'latest_nav', 'latest_nav_as_on_date')
     readonly_fields = ['amcfundscheme_id', 'created', 'modified','assets_under_management']
 
     list_filter = ['is_active', 'is_direct_fund', 'is_scheme_benchmark']
+    actions = ['activate_funds_with_holdings', 'check_data_quality']
+    
+    def holdings_count(self, obj):
+        """Show number of holdings for this fund"""
+        from gcia_app.models import SchemeUnderlyingHoldings
+        count = SchemeUnderlyingHoldings.objects.filter(amcfundscheme=obj, is_active=True).count()
+        return count if count > 0 else '-'
+    holdings_count.short_description = 'Holdings Count'
+    
+    def activate_funds_with_holdings(self, request, queryset):
+        """Admin action to activate funds that have holdings data"""
+        from gcia_app.models import SchemeUnderlyingHoldings
+        
+        funds_with_holdings_ids = SchemeUnderlyingHoldings.objects.values_list('amcfundscheme_id', flat=True).distinct()
+        inactive_funds_with_holdings = queryset.filter(
+            amcfundscheme_id__in=funds_with_holdings_ids,
+            is_active=False
+        )
+        
+        activated_count = inactive_funds_with_holdings.update(is_active=True)
+        
+        if activated_count > 0:
+            self.message_user(
+                request,
+                f'Successfully activated {activated_count} funds that have holdings data.',
+                level=messages.SUCCESS
+            )
+        else:
+            self.message_user(
+                request,
+                'No inactive funds with holdings data found to activate.',
+                level=messages.INFO
+            )
+    
+    activate_funds_with_holdings.short_description = "Activate funds that have holdings data"
+    
+    def check_data_quality(self, request, queryset):
+        """Admin action to check data quality for fund-holdings relationships"""
+        from gcia_app.models import SchemeUnderlyingHoldings
+        
+        total_funds = queryset.count()
+        active_funds = queryset.filter(is_active=True).count()
+        inactive_funds = total_funds - active_funds
+        
+        funds_with_holdings_ids = SchemeUnderlyingHoldings.objects.values_list('amcfundscheme_id', flat=True).distinct()
+        active_funds_with_holdings = queryset.filter(
+            is_active=True,
+            amcfundscheme_id__in=funds_with_holdings_ids
+        ).count()
+        inactive_funds_with_holdings = queryset.filter(
+            is_active=False,
+            amcfundscheme_id__in=funds_with_holdings_ids
+        ).count()
+        
+        active_funds_without_holdings = queryset.filter(is_active=True).exclude(
+            amcfundscheme_id__in=funds_with_holdings_ids
+        ).count()
+        
+        message = f"""
+        Data Quality Report for {total_funds} selected funds:
+        • Active funds: {active_funds} ({active_funds_with_holdings} with holdings, {active_funds_without_holdings} without)
+        • Inactive funds: {inactive_funds} ({inactive_funds_with_holdings} with holdings, {inactive_funds - inactive_funds_with_holdings} without)
+        """
+        
+        if inactive_funds_with_holdings > 0:
+            message += f"\n⚠️  WARNING: {inactive_funds_with_holdings} inactive funds have holdings data - consider activating them!"
+            level = messages.WARNING
+        else:
+            message += "\n✓ All funds with holdings data are active - data quality is good!"
+            level = messages.SUCCESS
+        
+        self.message_user(request, message, level=level)
+    
+    check_data_quality.short_description = "Check data quality (fund-holdings relationships)"
 
     def get_queryset(self, request):
         if 'change' not in request.get_full_path():
@@ -111,7 +185,7 @@ admin.site.register(SchemeUnderlyingHoldings, SchemeUnderlyingHoldingsAdmin)
 # Add this to gcia_app/admin.py
 
 from django.contrib import admin
-from gcia_app.models import Stock, StockQuarterlyData, StockUploadLog
+from gcia_app.models import Stock, StockQuarterlyData, StockUploadLog, MutualFundMetrics, MetricsCalculationLog
 
 @admin.register(Stock)
 class StockAdmin(admin.ModelAdmin):
@@ -364,4 +438,101 @@ class StockUploadLogAdmin(admin.ModelAdmin):
     
     def has_add_permission(self, request):
         # Don't allow manual creation of upload logs
+        return False
+
+
+@admin.register(MutualFundMetrics)
+class MutualFundMetricsAdmin(admin.ModelAdmin):
+    list_display = (
+        'metrics_id', 'fund_name', 'total_holdings', 'total_weightage',
+        'portfolio_current_pe', 'portfolio_market_cap', 'calculation_status', 'calculation_date'
+    )
+    list_filter = ('calculation_status', 'calculation_date', 'data_as_of_date')
+    search_fields = ('amcfundscheme__name', 'amcfundscheme__fund_name')
+    readonly_fields = ('metrics_id', 'calculation_date', 'last_updated')
+    list_per_page = 50
+    ordering = ('-calculation_date', 'amcfundscheme__name')
+    raw_id_fields = ('amcfundscheme',)
+    
+    fieldsets = (
+        ('Fund Information', {
+            'fields': ('amcfundscheme', 'calculation_status', 'calculation_notes')
+        }),
+        ('Portfolio Composition', {
+            'fields': ('total_holdings', 'total_weightage', 'data_as_of_date')
+        }),
+        ('Market Cap Metrics', {
+            'fields': ('portfolio_market_cap', 'portfolio_free_float_mcap')
+        }),
+        ('Profit & Growth Metrics', {
+            'fields': ('portfolio_pat', 'portfolio_ttm_pat', 'portfolio_qoq_growth', 'portfolio_yoy_growth')
+        }),
+        ('CAGR Metrics', {
+            'fields': ('portfolio_6yr_revenue_cagr', 'portfolio_6yr_pat_cagr')
+        }),
+        ('Valuation Metrics', {
+            'fields': ('portfolio_current_pe', 'portfolio_2yr_avg_pe', 'portfolio_5yr_avg_pe')
+        }),
+        ('Price/Revenue Metrics', {
+            'fields': ('portfolio_current_pr', 'portfolio_2yr_avg_pr', 'portfolio_reval_deval')
+        }),
+        ('Performance Metrics', {
+            'fields': ('portfolio_alpha', 'portfolio_beta', 'portfolio_roe', 'portfolio_roce')
+        }),
+        ('System Fields', {
+            'fields': ('metrics_id', 'calculation_date', 'last_updated'),
+            'classes': ('collapse',)
+        })
+    )
+    
+    def fund_name(self, obj):
+        return obj.amcfundscheme.name
+    fund_name.short_description = 'Fund Name'
+    fund_name.admin_order_field = 'amcfundscheme__name'
+    
+    def has_add_permission(self, request):
+        # Metrics should only be created through calculation process
+        return False
+
+
+@admin.register(MetricsCalculationLog)
+class MetricsCalculationLogAdmin(admin.ModelAdmin):
+    list_display = (
+        'log_id', 'initiated_by', 'calculation_type', 'status', 
+        'total_funds_targeted', 'funds_processed_successfully', 'started_at', 'processing_duration'
+    )
+    list_filter = ('status', 'calculation_type', 'started_at')
+    search_fields = ('initiated_by__username', 'error_summary')
+    readonly_fields = (
+        'log_id', 'started_at', 'completed_at', 'processing_duration',
+        'funds_processed_successfully', 'funds_with_partial_data', 'funds_failed'
+    )
+    list_per_page = 50
+    ordering = ('-started_at',)
+    raw_id_fields = ('initiated_by',)
+    
+    fieldsets = (
+        ('Calculation Info', {
+            'fields': ('initiated_by', 'calculation_type', 'status')
+        }),
+        ('Results Summary', {
+            'fields': (
+                'total_funds_targeted', 'funds_processed_successfully',
+                'funds_with_partial_data', 'funds_failed'
+            )
+        }),
+        ('Data Quality', {
+            'fields': ('avg_holdings_per_fund', 'avg_data_completeness_pct')
+        }),
+        ('Timing', {
+            'fields': ('started_at', 'completed_at', 'processing_duration')
+        }),
+        ('Error Details', {
+            'fields': ('error_summary', 'detailed_log'),
+            'classes': ('collapse',)
+        })
+    )
+    
+    def has_add_permission(self, request):
+        # Logs should only be created through calculation process
         return False

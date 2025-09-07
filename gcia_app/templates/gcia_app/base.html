@@ -163,8 +163,13 @@
             <li class="nav-item">
                 <a href="{% url 'process_portfolio_valuation' %}" class="nav-link {% if request.resolver_match.url_name == 'process_portfolio_valuation' %}active{% endif %}">ECAS Portfolio</a>
             </li>
+            {% comment "COMMENTED OUT - Fund Analysis functionality disabled" %}
             <li class="nav-item">
                 <a href="{% url 'fund_analysis' %}" class="nav-link {% if request.resolver_match.url_name == 'fund_analysis' %}active{% endif %}">Fund Analysis</a>
+            </li>
+            {% endcomment %}
+            <li class="nav-item">
+                <a href="{% url 'mf_metrics' %}" class="nav-link {% if request.resolver_match.url_name == 'mf_metrics' %}active{% endif %}">MF Metrics</a>
             </li>
             <li class="nav-item">
                 <a href="{% url 'process_financial_planning' %}" class="nav-link {% if request.resolver_match.url_name == 'process_financial_planning' %}active{% endif %}">Financial Planning</a>

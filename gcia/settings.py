@@ -153,7 +153,7 @@ SESSION_EXPIRE_AT_BROWSER_CLOSE = True  # Session expires when browser closes
 
 import os
 
-# Media files configuration (add if not already present)
+# Media files configuration
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
@@ -162,7 +162,11 @@ FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50MB
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50MB
 FILE_UPLOAD_PERMISSIONS = 0o644
 
-# Logging configuration (add to existing LOGGING or create new)
+# Create logs directory
+LOGS_DIR = os.path.join(BASE_DIR, 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+
+# Enhanced logging configuration with data quality tracking
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -175,6 +179,10 @@ LOGGING = {
             'format': '{levelname} {message}',
             'style': '{',
         },
+        'data_quality': {
+            'format': '[DATA_QUALITY] {asctime} {levelname}: {message}',
+            'style': '{',
+        },
     },
     'handlers': {
         'file': {
@@ -182,6 +190,12 @@ LOGGING = {
             'class': 'logging.FileHandler',
             'filename': os.path.join(BASE_DIR, 'logs', 'django.log'),
             'formatter': 'verbose',
+        },
+        'data_quality_file': {
+            'level': 'INFO',
+            'class': 'logging.FileHandler',
+            'filename': os.path.join(BASE_DIR, 'logs', 'data_quality.log'),
+            'formatter': 'data_quality',
         },
         'console': {
             'level': 'DEBUG',
@@ -195,67 +209,10 @@ LOGGING = {
             'level': 'INFO',
             'propagate': True,
         },
-        'django': {
-            'handlers': ['file'],
+        'gcia_app.data_quality': {
+            'handlers': ['data_quality_file', 'console'],
             'level': 'INFO',
-            'propagate': True,
-        },
-    },
-}
-
-# Create logs directory
-LOGS_DIR = os.path.join(BASE_DIR, 'logs')
-os.makedirs(LOGS_DIR, exist_ok=True)
-
-# Also add to your main gcia/urls.py for media files in development:
-# 
-# if settings.DEBUG:
-#     from django.conf.urls.static import static
-#     urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)# Add these to your gcia/settings.py
-
-import os
-
-# Media files configuration (add if not already present)
-MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
-
-# File upload settings
-FILE_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50MB
-DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024  # 50MB
-FILE_UPLOAD_PERMISSIONS = 0o644
-
-# Logging configuration (add to existing LOGGING or create new)
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
-        },
-        'simple': {
-            'format': '{levelname} {message}',
-            'style': '{',
-        },
-    },
-    'handlers': {
-        'file': {
-            'level': 'INFO',
-            'class': 'logging.FileHandler',
-            'filename': os.path.join(BASE_DIR, 'logs', 'django.log'),
-            'formatter': 'verbose',
-        },
-        'console': {
-            'level': 'DEBUG',
-            'class': 'logging.StreamHandler',
-            'formatter': 'simple',
-        },
-    },
-    'loggers': {
-        'gcia_app': {
-            'handlers': ['file', 'console'],
-            'level': 'INFO',
-            'propagate': True,
+            'propagate': False,
         },
         'django': {
             'handlers': ['file'],
@@ -264,10 +221,6 @@ LOGGING = {
         },
     },
 }
-
-# Create logs directory
-LOGS_DIR = os.path.join(BASE_DIR, 'logs')
-os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Template files directory (add this)
 TEMPLATE_FILES_DIR = os.path.join(BASE_DIR, 'template_files')

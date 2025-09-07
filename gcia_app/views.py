@@ -23,8 +23,14 @@ from django.db import transaction
 from decimal import Decimal, InvalidOperation
 from gcia_app.index_scrapper_from_screener import get_bse500_pe_ratio
 import json
-from django.db.models import Q
+from django.db.models import Q, Count
 from django.core.exceptions import ValidationError
+from typing import Dict, List
+import logging
+
+# Set up logging
+logger = logging.getLogger(__name__)
+data_quality_logger = logging.getLogger('gcia_app.data_quality')
 
 def signup_view(request):
     if request.method == 'POST':
@@ -233,20 +239,32 @@ def process_index_nav_file(excel_file):
     return stats
 
 def process_underlying_holdings_file(excel_file):
+    data_quality_logger.info("=== STARTING HOLDINGS UPLOAD PROCESS ===")
+    data_quality_logger.info(f"Processing file: {excel_file.name}")
+    
     # Read the Excel file, skipping the first 2 rows as header starts at row 3
     try:
         holdings_df = pd.read_excel(excel_file, skiprows=3)
+        data_quality_logger.info(f"Successfully loaded {len(holdings_df)} records from Excel file")
     except Exception as e:
+        data_quality_logger.error(f"Error reading Excel file: {str(e)}")
         raise ValueError(f"Error reading Excel file: {str(e)}")
 
     holdings_df['PD_Date'] = pd.to_datetime(holdings_df['PD_Date'], dayfirst=True)
 
     # with transaction.atomic():  # Use transaction to ensure data integrity
     # Update prev Holding to Inactive state
+    prev_holdings_count = SchemeUnderlyingHoldings.objects.filter(is_active=True).count()
     SchemeUnderlyingHoldings.objects.all().update(is_active=False)
+    data_quality_logger.info(f"Deactivated {prev_holdings_count} existing holdings records")
     
     holdings_df = holdings_df.dropna(subset=['SD_Scheme ISIN'])
+    data_quality_logger.info(f"Processing {len(holdings_df)} holdings records after cleaning")
+    
     underlying_holdings_create_list = []
+    funds_created = 0
+    funds_activated = 0
+    
     for index, row in holdings_df.iterrows():
         print(index, row["SD_Scheme AMFI Code"], pd.isna(row["SD_Scheme AMFI Code"]))
         if pd.isna(row["SD_Scheme AMFI Code"]):
@@ -255,7 +273,25 @@ def process_underlying_holdings_file(excel_file):
             mf = AMCFundScheme.objects.filter(amfi_scheme_code=row["SD_Scheme AMFI Code"], isin_number=row["SD_Scheme ISIN"]).first()
         
         if not mf:
-            mf = AMCFundScheme.objects.create(name=row["Scheme Name"], accord_scheme_name=row["Scheme Name"], amfi_scheme_code=0 if pd.isna(row["SD_Scheme AMFI Code"]) else row["SD_Scheme AMFI Code"], isin_number=row["SD_Scheme ISIN"])
+            # Create new fund and auto-activate it since it has holdings data
+            mf = AMCFundScheme.objects.create(
+                name=row["Scheme Name"], 
+                accord_scheme_name=row["Scheme Name"], 
+                amfi_scheme_code=0 if pd.isna(row["SD_Scheme AMFI Code"]) else row["SD_Scheme AMFI Code"], 
+                isin_number=row["SD_Scheme ISIN"],
+                is_active=True  # Auto-activate funds that have holdings data
+            )
+            funds_created += 1
+            print(f"Created new ACTIVE fund: {mf.name} (ID: {mf.amcfundscheme_id})")
+            data_quality_logger.info(f"FUND_CREATED: {mf.name} (ID: {mf.amcfundscheme_id}, ISIN: {row['SD_Scheme ISIN']}) - AUTO-ACTIVATED")
+        
+        # Ensure existing fund is also active if it has holdings data
+        elif not mf.is_active:
+            mf.is_active = True
+            mf.save()
+            funds_activated += 1
+            print(f"Activated existing fund: {mf.name} (ID: {mf.amcfundscheme_id})")
+            data_quality_logger.info(f"FUND_ACTIVATED: {mf.name} (ID: {mf.amcfundscheme_id}, ISIN: {row['SD_Scheme ISIN']}) - Had holdings but was inactive")
         
         # Use helper function to find or create stock (consistent with Base Sheet processing)
         holding, _ = find_or_create_stock(
@@ -279,7 +315,47 @@ def process_underlying_holdings_file(excel_file):
     if underlying_holdings_create_list:
         SchemeUnderlyingHoldings.objects.bulk_create(underlying_holdings_create_list)     
     
-    return "Success"       
+    # Data Quality Validation: Ensure all funds with holdings are active
+    print("\n=== POST-UPLOAD VALIDATION ===")
+    data_quality_logger.info("=== POST-UPLOAD DATA QUALITY VALIDATION ===")
+    
+    funds_with_holdings_ids = SchemeUnderlyingHoldings.objects.values_list('amcfundscheme_id', flat=True).distinct()
+    inactive_funds_with_holdings = AMCFundScheme.objects.filter(
+        amcfundscheme_id__in=funds_with_holdings_ids,
+        is_active=False
+    )
+    
+    if inactive_funds_with_holdings.exists():
+        # This should not happen after our fix, but let's handle it just in case
+        activated_count = inactive_funds_with_holdings.update(is_active=True)
+        print(f"WARNING: Found {activated_count} inactive funds with holdings - automatically activated them")
+        data_quality_logger.warning(f"POST_UPLOAD_FIX: Found {activated_count} inactive funds with holdings - automatically activated them")
+        for fund in inactive_funds_with_holdings[:10]:  # Log first 10 for detail
+            data_quality_logger.warning(f"POST_UPLOAD_ACTIVATION: {fund.name} (ID: {fund.amcfundscheme_id})")
+    
+    # Summary statistics
+    total_holdings_created = len(underlying_holdings_create_list)
+    unique_funds_with_holdings = len(set(funds_with_holdings_ids))
+    active_funds_with_holdings = AMCFundScheme.objects.filter(
+        amcfundscheme_id__in=funds_with_holdings_ids,
+        is_active=True
+    ).count()
+    
+    print(f"✓ Created {total_holdings_created} new holdings records")
+    print(f"✓ Processed {unique_funds_with_holdings} unique funds with holdings")
+    print(f"✓ All {active_funds_with_holdings} funds with holdings are ACTIVE")
+    print("=== UPLOAD COMPLETED SUCCESSFULLY ===\n")
+    
+    # Log comprehensive summary
+    data_quality_logger.info("=== UPLOAD SUMMARY STATISTICS ===")
+    data_quality_logger.info(f"Holdings created: {total_holdings_created}")
+    data_quality_logger.info(f"New funds created: {funds_created}")
+    data_quality_logger.info(f"Existing funds activated: {funds_activated}")
+    data_quality_logger.info(f"Total unique funds with holdings: {unique_funds_with_holdings}")
+    data_quality_logger.info(f"All funds with holdings are active: {active_funds_with_holdings == unique_funds_with_holdings}")
+    data_quality_logger.info("=== HOLDINGS UPLOAD PROCESS COMPLETED SUCCESSFULLY ===")
+    
+    return f"Success: {total_holdings_created} holdings created for {unique_funds_with_holdings} active funds"       
 
 
 def transform_scheme_name(original_name):
@@ -1541,13 +1617,15 @@ def process_financial_planning(request):
 
 # Add this view to your existing gcia_app/views.py
 
+# COMMENTED OUT - Fund Analysis functionality disabled
+"""
 # Replace your search_stocks view in gcia_app/views.py with this improved version:
 
 @login_required
 def search_stocks(request):
-    """
+    \"\"\"
     AJAX endpoint for stock search functionality with debugging
-    """
+    \"\"\"
     query = request.GET.get('q', '').strip()
     
     print(f"Search request received: query='{query}'")  # Debug log
@@ -1582,14 +1660,17 @@ def search_stocks(request):
     except Exception as e:
         print(f"Error in search_stocks: {e}")  # Debug log
         return JsonResponse({'stocks': [], 'error': str(e)})
+"""
 
+# COMMENTED OUT - Fund Analysis functionality disabled
+"""
 # Also update your fund_analysis view to include debug info:
 
 @login_required
 def fund_analysis(request):
-    """
+    \"\"\"
     Fund Analysis page with simple stock selection and table management
-    """
+    \"\"\"
     # Get all active stocks for the search dropdown
     all_stocks = Stock.objects.filter(is_active=True).order_by('name')
     
@@ -1610,6 +1691,7 @@ def fund_analysis(request):
     }
     
     return render(request, 'gcia_app/fund_analysis.html', context)
+"""
 
 # Add this to your existing gcia_app/views.py file
 import os
@@ -1624,15 +1706,15 @@ import logging
 from datetime import datetime
 logger = logging.getLogger(__name__)
 
+# COMMENTED OUT - Fund Analysis functionality disabled
+"""
 # Replace the existing generate_fund_report_simple function with this:
 
 @login_required
 @require_http_methods(["POST"])
 def generate_fund_report_simple(request):
-    """
-    Generate and download Excel report directly when "Generate Report" is clicked
-    Fixed version that properly handles .xlsx format
-    """
+    # Generate and download Excel report directly when "Generate Report" is clicked
+    # Fixed version that properly handles .xlsx format
     try:
         # Parse JSON data from request
         data = json.loads(request.body)
@@ -1779,3 +1861,653 @@ def generate_fund_report_simple(request):
             'success': False,
             'message': f'An unexpected error occurred: {str(e)}'
         })
+
+
+# MF Metrics Views
+"""
+# End of generate_fund_report_simple function comment block
+
+import threading
+import time
+import tempfile
+from gcia_app.mf_metrics_calculator import MFMetricsCalculator
+from gcia_app.models import MutualFundMetrics, MetricsCalculationLog
+from django.views.decorators.http import require_http_methods
+
+# Simple progress tracking - always starts fresh
+calculation_progress = {
+    'status': 'idle',
+    'total_funds': 0,
+    'processed_funds': 0,
+    'successful_funds': 0,
+    'partial_funds': 0,
+    'failed_funds': 0,
+    'current_fund': '',
+    'error_message': '',
+    'log_id': None
+}
+
+@login_required
+def mf_metrics_page(request):
+    """
+    Main MF Metrics management page - always starts with fresh state
+    """
+    # Force reset calculation progress for fresh start every time
+    global calculation_progress
+    calculation_progress.update({
+        'status': 'idle',
+        'total_funds': 0,
+        'processed_funds': 0,
+        'successful_funds': 0,
+        'partial_funds': 0,
+        'failed_funds': 0,
+        'current_fund': '',
+        'error_message': '',
+        'log_id': None
+    })
+    
+    # Get last calculation log
+    last_calculation = MetricsCalculationLog.objects.filter(
+        initiated_by=request.user
+    ).order_by('-started_at').first()
+    
+    # Get active funds for dropdown
+    active_funds = AMCFundScheme.objects.filter(
+        is_active=True
+    ).annotate(
+        holdings_count=Count('schemeunderlyingholdings')
+    ).order_by('name')
+    
+    # Get recent metrics summary (top 20 by market cap)
+    metrics_summary = MutualFundMetrics.objects.filter(
+        calculation_status__in=['success', 'partial']
+    ).select_related(
+        'amcfundscheme'
+    ).order_by(
+        '-portfolio_market_cap'
+    )[:20]
+    
+    context = {
+        'last_calculation': last_calculation,
+        'active_funds': active_funds,
+        'metrics_summary': metrics_summary,
+        'total_active_funds': active_funds.count(),
+    }
+    
+    return render(request, 'gcia_app/mf_metrics.html', context)
+
+
+@login_required
+@require_http_methods(["POST"])
+def update_all_mf_metrics(request):
+    """
+    Start bulk calculation of all fund metrics (async) - simplified tracking
+    """
+    global calculation_progress
+    
+    try:
+        # Check if calculation is already running
+        if calculation_progress['status'] == 'running':
+            return JsonResponse({
+                'success': False,
+                'message': 'Calculation is already in progress'
+            })
+        
+        # Parse request data
+        data = json.loads(request.body)
+        force_recalculate = data.get('force_recalculate', False)
+        
+        # Initialize progress tracking
+        active_funds_count = AMCFundScheme.objects.filter(is_active=True).count()
+        calculation_progress.update({
+            'status': 'running',
+            'total_funds': active_funds_count,
+            'processed_funds': 0,
+            'successful_funds': 0,
+            'partial_funds': 0,
+            'failed_funds': 0,
+            'current_fund': 'Initializing...',
+            'error_message': '',
+            'log_id': None
+        })
+        
+        # Start calculation in separate thread
+        calculation_thread = threading.Thread(
+            target=run_metrics_calculation,
+            args=(request.user, force_recalculate)
+        )
+        calculation_thread.daemon = True
+        calculation_thread.start()
+        
+        return JsonResponse({
+            'success': True,
+            'message': f'Metrics calculation started for {active_funds_count} funds',
+            'total_funds': active_funds_count
+        })
+        
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON data received'
+        })
+    except Exception as e:
+        logger.error(f"Error starting metrics calculation: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error starting calculation: {str(e)}'
+        })
+
+
+def run_metrics_calculation(user, force_recalculate=False):
+    """
+    Run the metrics calculation in background thread
+    """
+    global calculation_progress
+    
+    try:
+        calculator = MFMetricsCalculator()
+        
+        # Get all active funds
+        active_funds = AMCFundScheme.objects.filter(is_active=True).order_by('name')
+        
+        calculation_progress['total_funds'] = active_funds.count()
+        
+        # Create calculation log
+        calc_log = MetricsCalculationLog.objects.create(
+            initiated_by=user,
+            calculation_type='bulk_all',
+            status='running',
+            total_funds_targeted=active_funds.count()
+        )
+        calculation_progress['log_id'] = calc_log.log_id
+        
+        # Process each fund
+        for index, fund in enumerate(active_funds, 1):
+            try:
+                calculation_progress['current_fund'] = fund.name
+                calculation_progress['processed_funds'] = index
+                
+                result = calculator.calculate_single_fund_metrics(fund, force_recalculate)
+                
+                if result['status'] == 'success':
+                    calculation_progress['successful_funds'] += 1
+                elif result['status'] == 'partial':
+                    calculation_progress['partial_funds'] += 1
+                elif result['status'] == 'failed':
+                    calculation_progress['failed_funds'] += 1
+                # 'skipped' doesn't count as failed
+                
+                # Brief pause to prevent overwhelming the database
+                time.sleep(0.1)
+                
+            except Exception as e:
+                logger.error(f"Error processing fund {fund.name}: {str(e)}")
+                calculation_progress['failed_funds'] += 1
+        
+        # Update final log
+        calc_log.status = 'completed'
+        calc_log.completed_at = timezone.now()
+        calc_log.funds_processed_successfully = calculation_progress['successful_funds']
+        calc_log.funds_with_partial_data = calculation_progress['partial_funds']
+        calc_log.funds_failed = calculation_progress['failed_funds']
+        calc_log.save()
+        
+        calculation_progress['status'] = 'completed'
+        logger.info(f"Metrics calculation completed: {calculation_progress}")
+        
+    except Exception as e:
+        logger.error(f"Error in metrics calculation thread: {str(e)}")
+        calculation_progress['status'] = 'failed'
+        calculation_progress['error_message'] = str(e)
+        
+        # Update log if it exists
+        if calculation_progress['log_id']:
+            try:
+                calc_log = MetricsCalculationLog.objects.get(log_id=calculation_progress['log_id'])
+                calc_log.status = 'failed'
+                calc_log.completed_at = timezone.now()
+                calc_log.error_summary = str(e)
+                calc_log.save()
+            except:
+                pass
+
+
+@login_required
+@require_http_methods(["GET"])
+def mf_metrics_progress(request):
+    """
+    Get current progress of metrics calculation
+    """
+    global calculation_progress
+    
+    return JsonResponse({
+        'status': calculation_progress['status'],
+        'total_funds': calculation_progress['total_funds'],
+        'processed_funds': calculation_progress['processed_funds'],
+        'successful_funds': calculation_progress['successful_funds'],
+        'partial_funds': calculation_progress['partial_funds'],
+        'failed_funds': calculation_progress['failed_funds'],
+        'current_fund': calculation_progress['current_fund'],
+        'error_message': calculation_progress['error_message'],
+        'log_id': calculation_progress['log_id']
+    })
+
+
+
+
+@login_required
+@require_http_methods(["POST"])
+def download_portfolio_analysis(request):
+    """
+    Generate and download Portfolio Analysis Excel for a specific fund
+    """
+    try:
+        # Parse request data
+        data = json.loads(request.body)
+        fund_id = data.get('fund_id')
+        
+        if not fund_id:
+            return JsonResponse({
+                'success': False,
+                'message': 'Fund ID is required'
+            })
+        
+        # Get the fund
+        try:
+            fund = AMCFundScheme.objects.get(amcfundscheme_id=fund_id, is_active=True)
+        except AMCFundScheme.DoesNotExist:
+            return JsonResponse({
+                'success': False,
+                'message': 'Fund not found or inactive'
+            })
+        
+        # Get fund metrics (calculate if needed)
+        calculator = MFMetricsCalculator()
+        metrics_result = calculator.calculate_single_fund_metrics(fund, force_recalculate=False)
+        
+        if metrics_result['status'] == 'failed':
+            return JsonResponse({
+                'success': False,
+                'message': f'Cannot generate analysis: {metrics_result.get("message", "No data available")}'
+            })
+        
+        # Generate Excel file
+        excel_generator = PortfolioAnalysisExcelGenerator()
+        excel_file_path = excel_generator.generate_portfolio_analysis_excel(fund, metrics_result)
+        
+        if not excel_file_path or not os.path.exists(excel_file_path):
+            return JsonResponse({
+                'success': False,
+                'message': 'Failed to generate Excel file'
+            })
+        
+        # Prepare file response
+        try:
+            with open(excel_file_path, 'rb') as excel_file:
+                response = HttpResponse(
+                    excel_file.read(),
+                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+                )
+                
+                # Generate filename
+                safe_fund_name = re.sub(r'[^\w\s-]', '', fund.name).strip()
+                safe_fund_name = re.sub(r'[-\s]+', '_', safe_fund_name)
+                current_date = datetime.now().strftime('%Y%m%d_%H%M%S')
+                filename = f"{safe_fund_name}_Portfolio_Analysis_{current_date}.xlsx"
+                
+                response['Content-Disposition'] = f'attachment; filename="{filename}"'
+                
+                return response
+                
+        except Exception as e:
+            logger.error(f"Error reading generated Excel file: {str(e)}")
+            return JsonResponse({
+                'success': False,
+                'message': f'Error reading generated file: {str(e)}'
+            })
+        
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(excel_file_path):
+                    os.remove(excel_file_path)
+            except Exception as e:
+                logger.warning(f"Could not delete temporary file {excel_file_path}: {e}")
+                
+    except json.JSONDecodeError:
+        return JsonResponse({
+            'success': False,
+            'message': 'Invalid JSON data received'
+        })
+    except Exception as e:
+        logger.error(f"Error in download_portfolio_analysis: {str(e)}")
+        return JsonResponse({
+            'success': False,
+            'message': f'An unexpected error occurred: {str(e)}'
+        })
+
+
+# Portfolio Analysis Excel Generator
+class PortfolioAnalysisExcelGenerator:
+    """
+    Generate Portfolio Analysis Excel file matching the Old Bridge format
+    """
+    
+    def __init__(self):
+        self.workbook = None
+        self.worksheet = None
+    
+    def generate_portfolio_analysis_excel(self, fund: AMCFundScheme, metrics_result: Dict) -> str:
+        """
+        Generate Portfolio Analysis Excel file for the given fund
+        
+        Returns:
+            str: Path to generated Excel file
+        """
+        try:
+            # Create temporary file
+            temp_file = tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False)
+            temp_file.close()
+            
+            # Get holdings data
+            calculator = MFMetricsCalculator()
+            holdings_data = calculator.get_portfolio_holdings_data(fund)
+            
+            if not holdings_data:
+                raise ValueError("No holdings data available for this fund")
+            
+            # Create Excel file with pandas and openpyxl
+            with pd.ExcelWriter(temp_file.name, engine='openpyxl') as writer:
+                # Create Portfolio Analysis sheet
+                self.create_portfolio_analysis_sheet(writer, fund, holdings_data, metrics_result)
+            
+            logger.info(f"Generated Portfolio Analysis Excel for {fund.name} at {temp_file.name}")
+            return temp_file.name
+            
+        except Exception as e:
+            logger.error(f"Error generating Portfolio Analysis Excel: {str(e)}")
+            raise
+    
+    def create_portfolio_analysis_sheet(self, writer, fund: AMCFundScheme, holdings_data: List[Dict], metrics_result: Dict):
+        """
+        Create the Portfolio Analysis sheet matching Old Bridge format
+        """
+        # Prepare data for Excel
+        portfolio_data = []
+        
+        # Add header rows (matching Old Bridge format)
+        header_data = {
+            'Company Name': fund.name,
+            'Accord Code': '',
+            'Sector': 'Portfolio Analysis',
+            'Cap': f'As of {datetime.now().strftime("%B %Y")}',
+            'Weightage (%)': '',
+            'Market Cap (Cr)': '',
+            'TTM PAT (Cr)': '',
+            'Current PE': '',
+            'Quarterly Data': ''
+        }
+        portfolio_data.append(header_data)
+        
+        # Add empty rows for formatting
+        for i in range(6):
+            portfolio_data.append({col: '' for col in header_data.keys()})
+        
+        # Add holdings data (rows 8-34 equivalent)
+        for holding in holdings_data:
+            if holding['quarterly_data']:
+                latest_quarter = holding['quarterly_data'][0]
+                
+                holding_row = {
+                    'Company Name': holding['stock_name'],
+                    'Accord Code': '',  # Could be mapped from stock data if available
+                    'Sector': holding['sector'] or '',
+                    'Cap': '',  # Market cap category
+                    'Weightage (%)': holding['weightage'],
+                    'Market Cap (Cr)': latest_quarter.get('mcap', ''),
+                    'TTM PAT (Cr)': latest_quarter.get('ttm_pat', ''),
+                    'Current PE': latest_quarter.get('pe_ratio', ''),
+                    'Quarterly Data': f"Q{latest_quarter.get('quarter_number', '')}-{latest_quarter.get('quarter_year', '')}"
+                }
+                
+                # Add quarterly data columns (dates as column headers)
+                for qdata in holding['quarterly_data'][:8]:  # Last 8 quarters
+                    quarter_key = f"Q{qdata.get('quarter_number')}-{qdata.get('quarter_year')}"
+                    if quarter_key not in holding_row:
+                        holding_row[quarter_key] = qdata.get('mcap', '')
+                
+                portfolio_data.append(holding_row)
+        
+        # Add metrics calculation rows (equivalent to rows 35-60)
+        metrics_rows = self.create_metrics_rows(fund, metrics_result)
+        portfolio_data.extend(metrics_rows)
+        
+        # Convert to DataFrame and write to Excel
+        df = pd.DataFrame(portfolio_data)
+        df.to_excel(writer, sheet_name='Portfolio Analysis', index=False)
+        
+        # Get worksheet for formatting
+        worksheet = writer.sheets['Portfolio Analysis']
+        
+        # Apply formatting
+        self.apply_excel_formatting(worksheet, len(holdings_data))
+    
+    def create_metrics_rows(self, fund: AMCFundScheme, metrics_result: Dict) -> List[Dict]:
+        """
+        Create calculated metrics rows for the Excel
+        """
+        metrics_rows = []
+        
+        if 'calculated_metrics' in metrics_result:
+            calculated = metrics_result['calculated_metrics']
+            
+            # Add empty separator row
+            metrics_rows.append({col: '' for col in ['Company Name', 'Accord Code', 'Sector', 'Cap', 'Weightage (%)', 'Market Cap (Cr)', 'TTM PAT (Cr)', 'Current PE', 'Quarterly Data']})
+            
+            # TOTALS row
+            metrics_rows.append({
+                'Company Name': 'TOTALS',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': '',
+                'Market Cap (Cr)': calculated.get('portfolio_market_cap', ''),
+                'TTM PAT (Cr)': calculated.get('portfolio_ttm_pat', ''),
+                'Current PE': calculated.get('portfolio_current_pe', ''),
+                'Quarterly Data': ''
+            })
+            
+            # PATM row
+            metrics_rows.append({
+                'Company Name': 'PATM',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': '',
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': calculated.get('portfolio_pat', ''),
+                'Current PE': '',
+                'Quarterly Data': ''
+            })
+            
+            # QoQ Growth row
+            metrics_rows.append({
+                'Company Name': 'QoQ Growth (%)',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': calculated.get('portfolio_qoq_growth', ''),
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': '',
+                'Quarterly Data': ''
+            })
+            
+            # YoY Growth row
+            metrics_rows.append({
+                'Company Name': 'YoY Growth (%)',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': calculated.get('portfolio_yoy_growth', ''),
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': '',
+                'Quarterly Data': ''
+            })
+            
+            # 6 Year CAGR rows
+            metrics_rows.append({
+                'Company Name': '6 Year Revenue CAGR (%)',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': calculated.get('portfolio_6yr_revenue_cagr', ''),
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': '',
+                'Quarterly Data': ''
+            })
+            
+            metrics_rows.append({
+                'Company Name': '6 Year PAT CAGR (%)',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': calculated.get('portfolio_6yr_pat_cagr', ''),
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': '',
+                'Quarterly Data': ''
+            })
+            
+            # PE Average rows
+            metrics_rows.append({
+                'Company Name': '2 Yr Avg PE',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': '',
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': calculated.get('portfolio_2yr_avg_pe', ''),
+                'Quarterly Data': ''
+            })
+            
+            metrics_rows.append({
+                'Company Name': '5 Yr Avg PE',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': '',
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': calculated.get('portfolio_5yr_avg_pe', ''),
+                'Quarterly Data': ''
+            })
+            
+            # Reval/Deval row
+            metrics_rows.append({
+                'Company Name': 'Reval/Deval (%)',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': calculated.get('portfolio_reval_deval', ''),
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': '',
+                'Quarterly Data': ''
+            })
+            
+            # P/R ratios
+            metrics_rows.append({
+                'Company Name': 'Current P/R',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': '',
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': calculated.get('portfolio_current_pr', ''),
+                'Quarterly Data': ''
+            })
+            
+            metrics_rows.append({
+                'Company Name': '2 Yr Avg P/R',
+                'Accord Code': '',
+                'Sector': '',
+                'Cap': '',
+                'Weightage (%)': '',
+                'Market Cap (Cr)': '',
+                'TTM PAT (Cr)': '',
+                'Current PE': calculated.get('portfolio_2yr_avg_pr', ''),
+                'Quarterly Data': ''
+            })
+            
+            # Performance metrics
+            if calculated.get('portfolio_alpha'):
+                metrics_rows.append({
+                    'Company Name': 'Alpha (%)',
+                    'Accord Code': '',
+                    'Sector': '',
+                    'Cap': '',
+                    'Weightage (%)': calculated.get('portfolio_alpha', ''),
+                    'Market Cap (Cr)': '',
+                    'TTM PAT (Cr)': '',
+                    'Current PE': '',
+                    'Quarterly Data': ''
+                })
+        
+        return metrics_rows
+    
+    def apply_excel_formatting(self, worksheet, holdings_count: int):
+        """
+        Apply formatting to make the Excel look professional
+        """
+        from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+        
+        # Define styles
+        header_font = Font(bold=True, size=12)
+        header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
+        metrics_fill = PatternFill(start_color="D9E1F2", end_color="D9E1F2", fill_type="solid")
+        
+        thin_border = Border(
+            left=Side(style='thin'),
+            right=Side(style='thin'),
+            top=Side(style='thin'),
+            bottom=Side(style='thin')
+        )
+        
+        # Format header rows
+        for row in range(1, 8):
+            for col in range(1, 10):
+                cell = worksheet.cell(row=row, column=col)
+                if row == 1:
+                    cell.font = header_font
+                    cell.fill = header_fill
+                cell.border = thin_border
+        
+        # Format holdings data
+        for row in range(8, 8 + holdings_count):
+            for col in range(1, 10):
+                cell = worksheet.cell(row=row, column=col)
+                cell.border = thin_border
+                if col == 5:  # Weightage column
+                    cell.number_format = '0.00%'
+                elif col in [6, 7]:  # Market cap and PAT columns
+                    cell.number_format = '#,##0.00'
+        
+        # Format metrics rows
+        metrics_start_row = 8 + holdings_count + 1
+        for row in range(metrics_start_row, worksheet.max_row + 1):
+            for col in range(1, 10):
+                cell = worksheet.cell(row=row, column=col)
+                cell.fill = metrics_fill
+                cell.border = thin_border
+                if col == 1:  # Metric names
+                    cell.font = Font(bold=True)
+        
+        # Adjust column widths
+        column_widths = [25, 12, 15, 10, 12, 15, 15, 12, 12]
+        for i, width in enumerate(column_widths, 1):
+            worksheet.column_dimensions[worksheet.cell(row=1, column=i).column_letter].width = width

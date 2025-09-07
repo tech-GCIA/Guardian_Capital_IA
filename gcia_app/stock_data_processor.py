@@ -190,27 +190,35 @@ class StockDataProcessor:
     
     def _process_quarterly_financial_data(self, stock, row_data):
         """
-        Process quarterly financial data for the stock
-        Based on Excel structure:
-        - Market Cap data: columns 14-41 (dates), with corresponding values
+        Enhanced processing of quarterly financial data for the stock
+        Based on comprehensive Excel structure to populate ALL required fields for MF metrics
+        
+        Expected Excel structure (approximate column positions):
+        - Market Cap data: columns 14-41
+        - Free Float data: columns 42-69  
         - TTM Revenue: columns 74-108 
+        - Quarterly Revenue: columns 108-142
         - TTM PAT: columns 142-176
-        - Quarter codes: columns 74-108 contain YYYYMM format (202503, 202412, etc.)
+        - Quarterly PAT: columns 176-210
+        - PE ratios: columns 210-244
+        - P/R ratios: columns 244-278  
+        - ROCE data: columns 278-312
+        - ROE data: columns 312-346
         """
         
-        # Define the quarter mappings based on Excel analysis
+        # Enhanced quarter mappings with all financial metrics
         quarter_mappings = [
-            # Recent quarters first (Latest data)
-            {'year': 2025, 'quarter': 1, 'mcap_col': 14, 'revenue_col': 74, 'pat_col': 142},  # Q1 2025 (Jan-Mar 2025)
-            {'year': 2024, 'quarter': 4, 'mcap_col': 15, 'revenue_col': 75, 'pat_col': 143},  # Q4 2024 (Oct-Dec 2024)
-            {'year': 2024, 'quarter': 3, 'mcap_col': 16, 'revenue_col': 76, 'pat_col': 144},  # Q3 2024 (Jul-Sep 2024)
-            {'year': 2024, 'quarter': 2, 'mcap_col': 17, 'revenue_col': 77, 'pat_col': 145},  # Q2 2024 (Apr-Jun 2024)
-            {'year': 2024, 'quarter': 1, 'mcap_col': 18, 'revenue_col': 78, 'pat_col': 146},  # Q1 2024 (Jan-Mar 2024)
-            {'year': 2023, 'quarter': 4, 'mcap_col': 19, 'revenue_col': 79, 'pat_col': 147},  # Q4 2023
-            {'year': 2023, 'quarter': 3, 'mcap_col': 20, 'revenue_col': 80, 'pat_col': 148},  # Q3 2023
-            {'year': 2023, 'quarter': 2, 'mcap_col': 21, 'revenue_col': 81, 'pat_col': 149},  # Q2 2023
-            {'year': 2023, 'quarter': 1, 'mcap_col': 22, 'revenue_col': 82, 'pat_col': 150},  # Q1 2023
-            {'year': 2022, 'quarter': 4, 'mcap_col': 23, 'revenue_col': 83, 'pat_col': 151},  # Q4 2022
+            # Recent quarters first (Latest data) - estimated column positions
+            {'year': 2025, 'quarter': 1, 'mcap_col': 14, 'free_float_col': 42, 'ttm_rev_col': 74, 'q_rev_col': 108, 'ttm_pat_col': 142, 'q_pat_col': 176, 'pe_col': 210, 'pr_col': 244, 'roce_col': 278, 'roe_col': 312},
+            {'year': 2024, 'quarter': 4, 'mcap_col': 15, 'free_float_col': 43, 'ttm_rev_col': 75, 'q_rev_col': 109, 'ttm_pat_col': 143, 'q_pat_col': 177, 'pe_col': 211, 'pr_col': 245, 'roce_col': 279, 'roe_col': 313},
+            {'year': 2024, 'quarter': 3, 'mcap_col': 16, 'free_float_col': 44, 'ttm_rev_col': 76, 'q_rev_col': 110, 'ttm_pat_col': 144, 'q_pat_col': 178, 'pe_col': 212, 'pr_col': 246, 'roce_col': 280, 'roe_col': 314},
+            {'year': 2024, 'quarter': 2, 'mcap_col': 17, 'free_float_col': 45, 'ttm_rev_col': 77, 'q_rev_col': 111, 'ttm_pat_col': 145, 'q_pat_col': 179, 'pe_col': 213, 'pr_col': 247, 'roce_col': 281, 'roe_col': 315},
+            {'year': 2024, 'quarter': 1, 'mcap_col': 18, 'free_float_col': 46, 'ttm_rev_col': 78, 'q_rev_col': 112, 'ttm_pat_col': 146, 'q_pat_col': 180, 'pe_col': 214, 'pr_col': 248, 'roce_col': 282, 'roe_col': 316},
+            {'year': 2023, 'quarter': 4, 'mcap_col': 19, 'free_float_col': 47, 'ttm_rev_col': 79, 'q_rev_col': 113, 'ttm_pat_col': 147, 'q_pat_col': 181, 'pe_col': 215, 'pr_col': 249, 'roce_col': 283, 'roe_col': 317},
+            {'year': 2023, 'quarter': 3, 'mcap_col': 20, 'free_float_col': 48, 'ttm_rev_col': 80, 'q_rev_col': 114, 'ttm_pat_col': 148, 'q_pat_col': 182, 'pe_col': 216, 'pr_col': 250, 'roce_col': 284, 'roe_col': 318},
+            {'year': 2023, 'quarter': 2, 'mcap_col': 21, 'free_float_col': 49, 'ttm_rev_col': 81, 'q_rev_col': 115, 'ttm_pat_col': 149, 'q_pat_col': 183, 'pe_col': 217, 'pr_col': 251, 'roce_col': 285, 'roe_col': 319},
+            {'year': 2023, 'quarter': 1, 'mcap_col': 22, 'free_float_col': 50, 'ttm_rev_col': 82, 'q_rev_col': 116, 'ttm_pat_col': 150, 'q_pat_col': 184, 'pe_col': 218, 'pr_col': 252, 'roce_col': 286, 'roe_col': 320},
+            {'year': 2022, 'quarter': 4, 'mcap_col': 23, 'free_float_col': 51, 'ttm_rev_col': 83, 'q_rev_col': 117, 'ttm_pat_col': 151, 'q_pat_col': 185, 'pe_col': 219, 'pr_col': 253, 'roce_col': 287, 'roe_col': 321},
         ]
         
         # Process each quarter's data
@@ -219,68 +227,89 @@ class StockDataProcessor:
                 year = quarter_info['year']
                 quarter_num = quarter_info['quarter']
                 
-                # Extract financial data for this quarter
-                mcap = None
-                revenue = None
-                pat = None
+                # Extract ALL financial data for this quarter
+                financial_data = {}
                 
-                # Get Market Cap (in crores)
-                if quarter_info['mcap_col'] < len(row_data):
-                    mcap = self._convert_to_decimal(row_data[quarter_info['mcap_col']])
+                # Market Cap and Free Float data
+                financial_data['mcap'] = self._safely_extract_value(row_data, quarter_info['mcap_col'])
+                financial_data['free_float_mcap'] = self._safely_extract_value(row_data, quarter_info['free_float_col'])
                 
-                # Get Revenue (TTM)
-                if quarter_info['revenue_col'] < len(row_data):
-                    revenue = self._convert_to_decimal(row_data[quarter_info['revenue_col']])
+                # Revenue data (both TTM and quarterly)
+                financial_data['ttm_revenue'] = self._safely_extract_value(row_data, quarter_info['ttm_rev_col'])
+                financial_data['quarterly_revenue'] = self._safely_extract_value(row_data, quarter_info['q_rev_col'])
                 
-                # Get PAT (TTM)
-                if quarter_info['pat_col'] < len(row_data):
-                    pat = self._convert_to_decimal(row_data[quarter_info['pat_col']])
+                # PAT data (both TTM and quarterly)
+                financial_data['ttm_pat'] = self._safely_extract_value(row_data, quarter_info['ttm_pat_col'])
+                financial_data['quarterly_pat'] = self._safely_extract_value(row_data, quarter_info['q_pat_col'])
                 
-                # Only create record if we have at least one piece of financial data
-                if mcap is not None or revenue is not None or pat is not None:
+                # Ratio data
+                financial_data['pe_quarterly'] = self._safely_extract_value(row_data, quarter_info['pe_col'])
+                financial_data['pr_quarterly'] = self._safely_extract_value(row_data, quarter_info['pr_col'])
+                
+                # Profitability ratios
+                financial_data['roce'] = self._safely_extract_value(row_data, quarter_info['roce_col'])
+                financial_data['roe'] = self._safely_extract_value(row_data, quarter_info['roe_col'])
+                
+                # Legacy fields (for backwards compatibility)
+                financial_data['revenue'] = financial_data['ttm_revenue']  # Legacy field
+                financial_data['pat'] = financial_data['quarterly_pat'] or financial_data['ttm_pat']  # Prefer quarterly
+                financial_data['ttm'] = financial_data['ttm_revenue']  # Legacy field
+                
+                # Only create record if we have meaningful financial data
+                has_data = any(v is not None for v in financial_data.values())
+                
+                if has_data:
                     quarter_date = self._get_quarter_end_date(year, quarter_num)
+                    
+                    # Prepare defaults with all financial data
+                    defaults = {
+                        'quarter_date': quarter_date,
+                        **financial_data  # Unpack all financial data
+                    }
                     
                     # Create or update quarterly data
                     quarterly_data, created = StockQuarterlyData.objects.get_or_create(
                         stock=stock,
                         quarter_year=year,
                         quarter_number=quarter_num,
-                        defaults={
-                            'quarter_date': quarter_date,
-                            'mcap': mcap,
-                            'revenue': revenue,
-                            'pat': pat,
-                            'ttm': revenue,  # TTM is essentially the revenue for this context
-                        }
+                        defaults=defaults
                     )
                     
                     if created:
                         self.stats['quarterly_records_added'] += 1
+                        logger.debug(f"Created Q{quarter_num} {year} data for {stock.name}")
                     else:
-                        # Update existing record if new data is different
+                        # Update existing record with comprehensive data
                         updated = False
                         
-                        if mcap is not None and quarterly_data.mcap != mcap:
-                            quarterly_data.mcap = mcap
-                            updated = True
-                        
-                        if revenue is not None and quarterly_data.revenue != revenue:
-                            quarterly_data.revenue = revenue
-                            quarterly_data.ttm = revenue
-                            updated = True
-                        
-                        if pat is not None and quarterly_data.pat != pat:
-                            quarterly_data.pat = pat
-                            updated = True
+                        for field, value in financial_data.items():
+                            if value is not None and hasattr(quarterly_data, field):
+                                current_value = getattr(quarterly_data, field)
+                                if current_value != value:
+                                    setattr(quarterly_data, field, value)
+                                    updated = True
                         
                         if updated:
                             quarterly_data.save()
                             self.stats['quarterly_records_updated'] += 1
+                            logger.debug(f"Updated Q{quarter_num} {year} data for {stock.name}")
                             
             except Exception as e:
                 error_msg = f"Error processing Q{quarter_num} {year} for {stock.name}: {str(e)}"
                 logger.warning(error_msg)
                 self.stats['errors'].append(error_msg)
+    
+    def _safely_extract_value(self, row_data, column_index):
+        """
+        Safely extract and convert a value from the specified column
+        """
+        try:
+            if column_index < len(row_data):
+                return self._convert_to_decimal(row_data[column_index])
+            return None
+        except Exception as e:
+            logger.debug(f"Error extracting value from column {column_index}: {e}")
+            return None
     
     def _convert_to_decimal(self, value):
         """

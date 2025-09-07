@@ -400,3 +400,205 @@ class StockUploadLog(models.Model):
     
     def __str__(self):
         return f"{self.filename} - {self.status} ({self.uploaded_at})"
+
+
+class MutualFundMetrics(models.Model):
+    """
+    Model to store calculated portfolio metrics for each AMC Fund Scheme
+    Based on underlying holdings and their quarterly data
+    """
+    metrics_id = models.AutoField(primary_key=True)
+    amcfundscheme = models.ForeignKey(AMCFundScheme, on_delete=models.CASCADE, related_name='metrics')
+    
+    # Portfolio composition metadata
+    total_holdings = models.IntegerField(default=0, help_text='Number of underlying holdings')
+    total_weightage = models.DecimalField(max_digits=5, decimal_places=2, default=0, help_text='Total portfolio weightage %')
+    
+    # Calculated Portfolio Metrics (based on Portfolio Analysis sheet)
+    # TOTALS - Portfolio level aggregated values
+    portfolio_market_cap = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True,
+        verbose_name='Portfolio Market Cap (Cr)', help_text='Weighted average market cap'
+    )
+    portfolio_free_float_mcap = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True,
+        verbose_name='Portfolio Free Float MCap (Cr)'
+    )
+    
+    # PATM - Profit After Tax Metrics
+    portfolio_pat = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True,
+        verbose_name='Portfolio PAT (Cr)', help_text='Weighted average PAT'
+    )
+    portfolio_ttm_pat = models.DecimalField(
+        max_digits=15, decimal_places=2, null=True, blank=True,
+        verbose_name='Portfolio TTM PAT (Cr)'
+    )
+    
+    # Growth Metrics - QoQ, YoY
+    portfolio_qoq_growth = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio QoQ Growth (%)', help_text='Quarter over Quarter growth'
+    )
+    portfolio_yoy_growth = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio YoY Growth (%)', help_text='Year over Year growth'
+    )
+    
+    # CAGR Metrics
+    portfolio_6yr_revenue_cagr = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio 6Yr Revenue CAGR (%)'
+    )
+    portfolio_6yr_pat_cagr = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio 6Yr PAT CAGR (%)'
+    )
+    
+    # Valuation Metrics - PE Ratios
+    portfolio_current_pe = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio Current PE', help_text='Weighted current PE ratio'
+    )
+    portfolio_2yr_avg_pe = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio 2Yr Avg PE'
+    )
+    portfolio_5yr_avg_pe = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio 5Yr Avg PE'
+    )
+    
+    # P/R Metrics (Price to Revenue)
+    portfolio_current_pr = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio Current P/R'
+    )
+    portfolio_2yr_avg_pr = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio 2Yr Avg P/R'
+    )
+    
+    # Revaluation/Devaluation Metrics
+    portfolio_reval_deval = models.DecimalField(
+        max_digits=10, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio Reval/Deval (%)'
+    )
+    
+    # Alpha and Performance Metrics
+    portfolio_alpha = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio Alpha (%)', help_text='Alpha vs benchmark'
+    )
+    portfolio_beta = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio Beta'
+    )
+    
+    # ROE/ROCE Metrics
+    portfolio_roe = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio ROE (%)', help_text='Weighted average ROE'
+    )
+    portfolio_roce = models.DecimalField(
+        max_digits=8, decimal_places=4, null=True, blank=True,
+        verbose_name='Portfolio ROCE (%)', help_text='Weighted average ROCE'
+    )
+    
+    # Calculation metadata
+    calculation_date = models.DateTimeField(auto_now_add=True)
+    last_updated = models.DateTimeField(auto_now=True)
+    data_as_of_date = models.DateField(null=True, blank=True, help_text='Latest quarter date used for calculations')
+    calculation_status = models.CharField(
+        max_length=20,
+        choices=[
+            ('success', 'Success'),
+            ('partial', 'Partial - Some data missing'),
+            ('failed', 'Failed'),
+        ],
+        default='success'
+    )
+    calculation_notes = models.TextField(blank=True, null=True, help_text='Calculation warnings or notes')
+    
+    class Meta:
+        db_table = 'mutual_fund_metrics'
+        verbose_name = 'Mutual Fund Metrics'
+        verbose_name_plural = 'Mutual Fund Metrics'
+        unique_together = ['amcfundscheme', 'calculation_date']
+        indexes = [
+            models.Index(fields=['amcfundscheme', '-calculation_date']),
+            models.Index(fields=['calculation_date']),
+            models.Index(fields=['calculation_status']),
+        ]
+        ordering = ['-calculation_date']
+    
+    def __str__(self):
+        return f"{self.amcfundscheme.name} - Metrics ({self.calculation_date.strftime('%Y-%m-%d')})"
+
+
+class MetricsCalculationLog(models.Model):
+    """
+    Model to track bulk metrics calculation runs
+    """
+    log_id = models.AutoField(primary_key=True)
+    initiated_by = models.ForeignKey('Customer', on_delete=models.CASCADE, help_text='User who initiated the calculation')
+    
+    # Calculation scope and results
+    calculation_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('bulk_all', 'Bulk Update All Funds'),
+            ('single_fund', 'Single Fund Update'),
+            ('selective', 'Selective Funds Update'),
+        ],
+        default='bulk_all'
+    )
+    
+    total_funds_targeted = models.IntegerField(default=0, help_text='Total funds selected for calculation')
+    funds_processed_successfully = models.IntegerField(default=0)
+    funds_with_partial_data = models.IntegerField(default=0)
+    funds_failed = models.IntegerField(default=0)
+    
+    # Timing information
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    processing_duration = models.DurationField(null=True, blank=True)
+    
+    # Status and error handling
+    status = models.CharField(
+        max_length=20,
+        choices=[
+            ('running', 'Running'),
+            ('completed', 'Completed'),
+            ('failed', 'Failed'),
+            ('cancelled', 'Cancelled'),
+        ],
+        default='running'
+    )
+    
+    error_summary = models.TextField(blank=True, null=True, help_text='Summary of errors encountered')
+    detailed_log = models.TextField(blank=True, null=True, help_text='Detailed processing log')
+    
+    # Data quality metrics
+    avg_holdings_per_fund = models.DecimalField(max_digits=8, decimal_places=2, null=True, blank=True)
+    avg_data_completeness_pct = models.DecimalField(max_digits=5, decimal_places=2, null=True, blank=True)
+    
+    class Meta:
+        db_table = 'metrics_calculation_log'
+        verbose_name = 'Metrics Calculation Log'
+        verbose_name_plural = 'Metrics Calculation Logs'
+        ordering = ['-started_at']
+        indexes = [
+            models.Index(fields=['initiated_by', '-started_at']),
+            models.Index(fields=['status']),
+            models.Index(fields=['calculation_type']),
+        ]
+    
+    def __str__(self):
+        return f"{self.calculation_type} - {self.status} ({self.started_at.strftime('%Y-%m-%d %H:%M')})"
+    
+    def save(self, *args, **kwargs):
+        # Calculate processing duration when completed
+        if self.completed_at and self.started_at and not self.processing_duration:
+            self.processing_duration = self.completed_at - self.started_at
+        super().save(*args, **kwargs)
