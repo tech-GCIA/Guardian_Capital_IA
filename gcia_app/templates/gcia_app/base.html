@@ -169,9 +169,11 @@
             <li class="nav-item">
                 <a href="{% url 'process_financial_planning' %}" class="nav-link {% if request.resolver_match.url_name == 'process_financial_planning' %}active{% endif %}">Financial Planning</a>
             </li>
+            {% comment "COMMENTED OUT - Upload Stock Data functionality disabled" %}
             <li class="nav-item">
                 <a href="{% url 'upload_stock_data' %}" class="nav-link {% if request.resolver_match.url_name == 'upload_stock_data' %}active{% endif %}">Upload Stock Data</a>
             </li>
+            {% endcomment %}
             {% if request.user.is_superuser %}
                 <li class="nav-item">
                     <a href="{% url 'process_amcfs_nav_and_returns' %}" class="nav-link {% if request.resolver_match.url_name == 'process_amcfs_nav_and_returns' %}active{% endif %}">Upload Master Data</a>
