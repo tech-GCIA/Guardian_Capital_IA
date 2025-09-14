@@ -326,8 +326,7 @@ function removeStock(index) {
     }
 }
 
-// Update the generateAndDownloadReport function in your fund_analysis.html template
-
+// Generate and download report function
 function generateAndDownloadReport() {
     console.log('Generate and download report clicked');
     
@@ -383,54 +382,38 @@ function generateAndDownloadReport() {
     })
     .then(response => {
         console.log('Response received:', response);
-        console.log('Response headers:', response.headers);
-        
-        // Check content type
+        // Check if response is JSON (error) or Excel file (success)
         const contentType = response.headers.get('content-type');
-        console.log('Content type:', contentType);
         
         if (contentType && contentType.includes('application/json')) {
             // Error response in JSON format
             return response.json().then(data => {
                 throw new Error(data.message || 'Unknown error occurred');
             });
-        } else if (response.ok) {
-            // Success - return blob for Excel file
+        } else if (contentType && contentType.includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')) {
+            // Excel file response - success
             return response.blob();
         } else {
-            // Non-JSON error response
-            throw new Error(`Server error: ${response.status} ${response.statusText}`);
+            // Unexpected content type
+            throw new Error('Unexpected response format from server');
         }
     })
     .then(blob => {
-        console.log('Blob received:', blob);
-        console.log('Blob type:', blob.type);
-        console.log('Blob size:', blob.size);
-        
-        // Verify blob is valid
-        if (blob.size === 0) {
-            throw new Error('Received empty file from server');
-        }
-        
         // Create download link
         const url = window.URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
         
-        // Generate filename with .xlsx extension (NOT .xlsm)
+        // Generate filename
         const safeFundName = fundName.replace(/[^a-zA-Z0-9\s\-_]/g, '').replace(/\s+/g, '_');
         const currentDate = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-        a.download = `${safeFundName}_MF_Analysis_${currentDate}.xlsx`;  // Important: .xlsx extension
+        a.download = `${safeFundName}_Analysis_file_${currentDate}.xlsm`;  // Changed to .xlsm
         
         // Trigger download
         document.body.appendChild(a);
         a.click();
         document.body.removeChild(a);
-        
-        // Clean up
-        setTimeout(() => {
-            window.URL.revokeObjectURL(url);
-        }, 100);
+        window.URL.revokeObjectURL(url);
         
         showAlert(`Excel report for "${fundName}" downloaded successfully!`, 'success');
         
@@ -451,6 +434,7 @@ function generateAndDownloadReport() {
         generateBtn.disabled = false;
     });
 }
+
 // Show alert function
 function showAlert(message, type) {
     console.log('Showing alert:', message, type);

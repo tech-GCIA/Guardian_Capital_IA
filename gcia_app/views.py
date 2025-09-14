@@ -1272,7 +1272,6 @@ logger = logging.getLogger(__name__)
 def generate_fund_report_simple(request):
     """
     Generate and download Excel report directly when "Generate Report" is clicked
-    Fixed version that properly handles .xlsx format
     """
     try:
         # Parse JSON data from request
@@ -1342,11 +1341,9 @@ def generate_fund_report_simple(request):
             output_path = report_generator.generate_report(fund_name, selected_stocks)
         except FileNotFoundError as e:
             logger.error(f"Template file not found: {str(e)}")
-            # Since we're not using template anymore, this shouldn't happen
-            # But keeping for backward compatibility
             return JsonResponse({
                 'success': False,
-                'message': f'Error generating report: {str(e)}'
+                'message': f'Template file not found. Please ensure the Excel template file is placed in the project directory. Details: {str(e)}'
             })
         except Exception as e:
             logger.error(f"Error generating report: {str(e)}")
@@ -1366,28 +1363,19 @@ def generate_fund_report_simple(request):
         # Read the file and create HTTP response
         try:
             with open(output_path, 'rb') as excel_file:
-                file_content = excel_file.read()
-                
-                # Create response with correct MIME type for .xlsx files
                 response = HttpResponse(
-                    file_content,
+                    excel_file.read(),
                     content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
                 )
                 
-                # Set filename for download - IMPORTANT: Use .xlsx extension
+                # Set filename for download
                 safe_fund_name = "".join(c for c in fund_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
                 safe_fund_name = safe_fund_name.replace(' ', '_')
                 current_date = datetime.now().strftime('%Y%m%d')
-                filename = f"{safe_fund_name}_MF_Analysis_{current_date}.xlsx"  # Changed to .xlsx
+                filename = f"{safe_fund_name}_Analysis_file_{current_date}.xlsm"  # Changed to .xlsm
                 
                 response['Content-Disposition'] = f'attachment; filename="{filename}"'
-                response['Content-Length'] = len(file_content)
-                
-                # Add additional headers to ensure proper file handling
-                response['Content-Transfer-Encoding'] = 'binary'
-                response['Cache-Control'] = 'no-cache, no-store, must-revalidate'
-                response['Pragma'] = 'no-cache'
-                response['Expires'] = '0'
+                response['Content-Length'] = os.path.getsize(output_path)
         
         except Exception as e:
             logger.error(f"Error reading generated file: {str(e)}")
@@ -1401,7 +1389,6 @@ def generate_fund_report_simple(request):
             try:
                 if os.path.exists(output_path):
                     os.remove(output_path)
-                    logger.info(f"Cleaned up temporary file: {output_path}")
             except Exception as e:
                 logger.warning(f"Could not delete temporary file {output_path}: {e}")
         
