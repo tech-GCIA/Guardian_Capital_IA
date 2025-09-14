@@ -39,7 +39,9 @@ class MasterDataExcelUploadForm(forms.Form):
         choices=[
             ('top_schemes', 'Top Schemes Data'),
             ('ratios_pe', 'Ratios, PE Data'),
-            ('index_nav', 'INDEX NAV')
+            ('index_nav', 'INDEX NAV'),
+            ('stocks_base_sheet', 'Stocks Base Sheet'),
+            ('underlying_stocks', 'Underlying Stocks')
         ],
         widget=forms.Select(attrs={'class': 'form-control'}),
         label="File Type"

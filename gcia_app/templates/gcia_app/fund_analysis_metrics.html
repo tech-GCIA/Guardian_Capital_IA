@@ -1,0 +1,192 @@
+{% extends 'gcia_app/base.html' %}
+
+{% block title %}Fund Analysis Metrics{% endblock %}
+
+{% block content %}
+    <h1>Fund Analysis Metrics</h1>
+
+    <!-- Display Toast Notifications -->
+    {% if messages %}
+        <div id="toast-container">
+            {% for message in messages %}
+                <div class="toast {{ message.tags }}">
+                    {{ message }}
+                </div>
+            {% endfor %}
+        </div>
+    {% endif %}
+
+    <div class="card">
+        <div class="card-body">
+            <h5 class="card-title">Select a Fund for Analysis</h5>
+            <p class="card-text">Choose a mutual fund from the dropdown below to download its portfolio analysis with integrated fund holdings and comprehensive stock financial metrics in the proper Portfolio Analysis format.</p>
+
+            <form method="get" id="fund-selection-form">
+                <div class="form-group mb-3">
+                    <label for="fund-select" class="form-label">Select Fund:</label>
+                    <select class="form-control" id="fund-select" name="selected_fund" required>
+                        <option value="">-- Select a Fund --</option>
+                        {% for fund in funds %}
+                            <option value="{{ fund.amcfundscheme_id }}">{{ fund.name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <button type="button" class="btn btn-secondary" id="download-btn" disabled>Download Fund Metrics</button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="window.location.href='{% url 'home' %}'">Back to Home</button>
+                </div>
+            </form>
+
+            <!-- Fund Information Display -->
+            <div id="fund-info" class="mt-4" style="display: none;">
+                <div class="alert alert-info">
+                    <h6><strong>Selected Fund:</strong> <span id="selected-fund-name"></span></h6>
+                    <p class="mb-0">Click "Download Fund Metrics" to get a Portfolio Analysis Excel file with integrated fund holdings data (weights, factor, value, shares) and comprehensive stock metrics in the correct format matching sample analysis reports.</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Additional Information Card -->
+    <div class="card mt-4">
+        <div class="card-header">
+            <h5 class="mb-0">About Fund Analysis Metrics</h5>
+        </div>
+        <div class="card-body">
+            <p>The Portfolio Analysis report includes:</p>
+            <ul>
+                <li><strong>Integrated Fund Data:</strong> Company name, accord code, sector, cap classification with market cap, weights, factor, value, and shares</li>
+                <li><strong>Financial Performance:</strong> Revenue and PAT data (6-year CAGR, TTM and quarterly periods)</li>
+                <li><strong>Market Data:</strong> Market cap and free float data over 25+ time periods</li>
+                <li><strong>Financial Ratios:</strong> ROCE, ROE, retention ratios over 12 financial years</li>
+                <li><strong>Stock Pricing:</strong> Share prices and PE ratios over 10+ dates</li>
+                <li><strong>Stock Identifiers:</strong> BSE codes, NSE symbols, and ISIN numbers</li>
+                <li><strong>Portfolio Headers:</strong> Fund name, portfolio date, and proper 8-row header structure</li>
+            </ul>
+            <p class="text-muted">The exported Excel file follows the exact Portfolio Analysis format with 405 columns, matching the structure of professional fund analysis reports.</p>
+        </div>
+    </div>
+
+{% endblock %}
+
+{% block extra_js %}
+    <script>
+        document.addEventListener('DOMContentLoaded', function () {
+            const fundSelect = document.getElementById('fund-select');
+            const downloadBtn = document.getElementById('download-btn');
+            const fundInfo = document.getElementById('fund-info');
+            const selectedFundName = document.getElementById('selected-fund-name');
+
+            console.log('Fund Analysis Metrics page loaded');
+            console.log('Elements found:', {
+                fundSelect: !!fundSelect,
+                downloadBtn: !!downloadBtn,
+                fundInfo: !!fundInfo,
+                selectedFundName: !!selectedFundName
+            });
+
+            // Ensure button starts disabled
+            if (downloadBtn) {
+                downloadBtn.disabled = true;
+                downloadBtn.classList.remove('btn-primary');
+                downloadBtn.classList.add('btn-secondary');
+            }
+
+            // Handle fund selection
+            if (fundSelect) {
+                fundSelect.addEventListener('change', function() {
+                    console.log('Fund selection changed:', this.value);
+                    const selectedValue = this.value;
+                    const selectedText = this.options[this.selectedIndex].text;
+
+                    if (selectedValue && selectedValue !== '') {
+                        console.log('Enabling download button for fund:', selectedText);
+
+                        // Enable download button
+                        downloadBtn.disabled = false;
+                        downloadBtn.classList.remove('btn-secondary');
+                        downloadBtn.classList.add('btn-primary');
+                        downloadBtn.style.cursor = 'pointer';
+
+                        // Show fund info
+                        if (selectedFundName) {
+                            selectedFundName.textContent = selectedText;
+                        }
+                        if (fundInfo) {
+                            fundInfo.style.display = 'block';
+                        }
+                    } else {
+                        console.log('Disabling download button');
+
+                        // Disable download button
+                        downloadBtn.disabled = true;
+                        downloadBtn.classList.remove('btn-primary');
+                        downloadBtn.classList.add('btn-secondary');
+                        downloadBtn.style.cursor = 'not-allowed';
+
+                        // Hide fund info
+                        if (fundInfo) {
+                            fundInfo.style.display = 'none';
+                        }
+                    }
+                });
+            }
+
+            // Handle download button click
+            if (downloadBtn) {
+                downloadBtn.addEventListener('click', function(e) {
+                    e.preventDefault();
+                    console.log('Download button clicked');
+
+                    const selectedFundId = fundSelect.value;
+                    console.log('Selected fund ID:', selectedFundId);
+
+                    if (selectedFundId && selectedFundId !== '') {
+                        // Show loading state
+                        const originalText = this.innerHTML;
+                        this.disabled = true;
+                        this.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Generating Excel...';
+                        this.classList.remove('btn-primary');
+                        this.classList.add('btn-info');
+
+                        // Create download URL
+                        const downloadUrl = "{% url 'download_fund_metrics' 0 %}".replace('0', selectedFundId);
+                        console.log('Download URL:', downloadUrl);
+
+                        // Create a hidden link and click it to trigger download
+                        const link = document.createElement('a');
+                        link.href = downloadUrl;
+                        link.style.display = 'none';
+                        document.body.appendChild(link);
+                        link.click();
+                        document.body.removeChild(link);
+
+                        // Reset button after a delay
+                        setTimeout(() => {
+                            this.disabled = false;
+                            this.innerHTML = originalText;
+                            this.classList.remove('btn-info');
+                            this.classList.add('btn-primary');
+                            console.log('Button reset');
+                        }, 3000);
+                    } else {
+                        alert('Please select a fund first.');
+                    }
+                });
+            }
+
+            // Handle toast notifications
+            const toasts = document.querySelectorAll('.toast');
+            toasts.forEach(toast => {
+                setTimeout(function() {
+                    toast.classList.add('fade');
+                }, 5000);
+
+                setTimeout(function() {
+                    toast.remove();
+                }, 6000);
+            });
+        });
+    </script>
+{% endblock %}
