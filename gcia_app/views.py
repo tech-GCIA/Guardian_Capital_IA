@@ -1252,158 +1252,63 @@ def fund_analysis(request):
     
     return render(request, 'gcia_app/fund_analysis.html', context)
 
-# Add this to your existing gcia_app/views.py file
-import os
-import json
-import tempfile
-from django.http import HttpResponse, JsonResponse
-from django.contrib.auth.decorators import login_required
-from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_http_methods
-from gcia_app.fund_report_generator import FundReportGenerator
-import logging
-from datetime import datetime
-logger = logging.getLogger(__name__)
-
-# Replace the existing generate_fund_report_simple function with this:
-
 @login_required
-@require_http_methods(["POST"])
 def generate_fund_report_simple(request):
     """
-    Generate and download Excel report directly when "Generate Report" is clicked
+    Simple fund report generation with validation
     """
-    try:
-        # Parse JSON data from request
-        data = json.loads(request.body)
-        fund_name = data.get('fund_name', '').strip()
-        selected_stocks = data.get('selected_stocks', [])
-        
-        # Validation
-        if not fund_name:
-            return JsonResponse({
-                'success': False,
-                'message': 'Please enter a fund name'
-            })
-        
-        if not selected_stocks:
-            return JsonResponse({
-                'success': False,
-                'message': 'Please select at least one stock'
-            })
-        
-        # Validate stock data
-        total_weightage = 0
-        for stock in selected_stocks:
-            try:
-                weightage = float(stock.get('weightage', 0))
-                shares = int(stock.get('shares', 0))
-                
-                if weightage <= 0:
-                    return JsonResponse({
-                        'success': False,
-                        'message': f'Invalid weightage for stock {stock.get("name", "Unknown")}: {weightage}'
-                    })
-                
-                if shares <= 0:
-                    return JsonResponse({
-                        'success': False,
-                        'message': f'Invalid number of shares for stock {stock.get("name", "Unknown")}: {shares}'
-                    })
-                
-                total_weightage += weightage
-                
-            except (ValueError, TypeError):
+    if request.method == 'POST':
+        try:
+            data = json.loads(request.body)
+            fund_name = data.get('fund_name', '').strip()
+            selected_stocks = data.get('selected_stocks', [])
+            
+            # Validation
+            if not fund_name:
                 return JsonResponse({
                     'success': False,
-                    'message': f'Invalid numeric data for stock {stock.get("name", "Unknown")}'
+                    'message': 'Please enter a fund name'
                 })
-        
-        # Check total weightage
-        if total_weightage > 100:
+            
+            if not selected_stocks:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Please select at least one stock'
+                })
+            
+            # Calculate total weightage
+            total_weightage = sum(float(stock.get('weightage', 0)) for stock in selected_stocks)
+            
+            if total_weightage > 100:
+                return JsonResponse({
+                    'success': False,
+                    'message': f'Total weightage ({total_weightage:.2f}%) cannot exceed 100%'
+                })
+            
+            if total_weightage <= 0:
+                return JsonResponse({
+                    'success': False,
+                    'message': 'Total weightage must be greater than 0%'
+                })
+            
+            # Store in session for report generation (Step 5.3)
+            request.session['fund_data'] = {
+                'fund_name': fund_name,
+                'total_weightage': total_weightage,
+                'stock_count': len(selected_stocks),
+                'stock_selections': selected_stocks
+            }
+            
             return JsonResponse({
-                'success': False,
-                'message': f'Total weightage ({total_weightage:.2f}%) cannot exceed 100%'
+                'success': True,
+                'message': f'Fund "{fund_name}" created successfully with {len(selected_stocks)} stocks and {total_weightage:.2f}% total weightage',
+                'redirect_url': '/app/fund_report_preview/'  # For Step 5.3
             })
-        
-        if total_weightage <= 0:
-            return JsonResponse({
-                'success': False,
-                'message': 'Total weightage must be greater than 0%'
-            })
-        
-        # Generate the Excel report
-        logger.info(f"Generating Excel report for fund: {fund_name}")
-        logger.info(f"Selected stocks: {len(selected_stocks)}")
-        
-        try:
-            report_generator = FundReportGenerator()
-            output_path = report_generator.generate_report(fund_name, selected_stocks)
-        except FileNotFoundError as e:
-            logger.error(f"Template file not found: {str(e)}")
-            return JsonResponse({
-                'success': False,
-                'message': f'Template file not found. Please ensure the Excel template file is placed in the project directory. Details: {str(e)}'
-            })
+            
         except Exception as e:
-            logger.error(f"Error generating report: {str(e)}")
-            logger.error(traceback.format_exc())
             return JsonResponse({
                 'success': False,
-                'message': f'Error generating report: {str(e)}'
+                'message': f'An error occurred: {str(e)}'
             })
-        
-        # Check if file was generated successfully
-        if not os.path.exists(output_path):
-            return JsonResponse({
-                'success': False,
-                'message': 'Failed to generate Excel report'
-            })
-        
-        # Read the file and create HTTP response
-        try:
-            with open(output_path, 'rb') as excel_file:
-                response = HttpResponse(
-                    excel_file.read(),
-                    content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                )
-                
-                # Set filename for download
-                safe_fund_name = "".join(c for c in fund_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
-                safe_fund_name = safe_fund_name.replace(' ', '_')
-                current_date = datetime.now().strftime('%Y%m%d')
-                filename = f"{safe_fund_name}_Analysis_file_{current_date}.xlsm"  # Changed to .xlsm
-                
-                response['Content-Disposition'] = f'attachment; filename="{filename}"'
-                response['Content-Length'] = os.path.getsize(output_path)
-        
-        except Exception as e:
-            logger.error(f"Error reading generated file: {str(e)}")
-            return JsonResponse({
-                'success': False,
-                'message': f'Error reading generated file: {str(e)}'
-            })
-        
-        finally:
-            # Clean up temporary file
-            try:
-                if os.path.exists(output_path):
-                    os.remove(output_path)
-            except Exception as e:
-                logger.warning(f"Could not delete temporary file {output_path}: {e}")
-        
-        return response
-        
-    except json.JSONDecodeError:
-        return JsonResponse({
-            'success': False,
-            'message': 'Invalid JSON data received'
-        })
     
-    except Exception as e:
-        logger.error(f"Unexpected error in generate_fund_report_simple: {str(e)}")
-        logger.error(traceback.format_exc())
-        return JsonResponse({
-            'success': False,
-            'message': f'An unexpected error occurred: {str(e)}'
-        })
+    return JsonResponse({'success': False, 'message': 'Invalid request method'})
