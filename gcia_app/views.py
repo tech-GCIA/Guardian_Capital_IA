@@ -3,13 +3,13 @@ from django.shortcuts import render, redirect
 from django.contrib.auth import authenticate, login, logout
 from django.contrib.auth.decorators import login_required
 from django.utils.timezone import now
-from datetime import timedelta, datetime
+from datetime import timedelta
 from gcia_app.forms import CustomerCreationForm
 from django.contrib import messages
 import openpyxl
 from django.http import HttpResponse, JsonResponse
 from gcia_app.forms import ExcelUploadForm, MasterDataExcelUploadForm
-from gcia_app.models import AMCFundScheme, AMCFundSchemeNavLog, Stock, StockQuarterlyData, StockUploadLog
+from gcia_app.models import AMCFundScheme, AMCFundSchemeNavLog, Stock
 import pandas as pd
 import os
 import datetime
@@ -20,7 +20,6 @@ from gcia_app.portfolio_analysis_ppt import create_fund_presentation
 import re
 from difflib import SequenceMatcher
 from django.db import transaction
-from decimal import Decimal, InvalidOperation
 from gcia_app.index_scrapper_from_screener import get_bse500_pe_ratio
 import json
 from django.db.models import Q
@@ -231,56 +230,6 @@ def process_index_nav_file(excel_file):
             scheme.save()
     
     return stats
-
-def process_underlying_holdings_file(excel_file):
-    # Read the Excel file, skipping the first 2 rows as header starts at row 3
-    try:
-        holdings_df = pd.read_excel(excel_file, skiprows=3)
-    except Exception as e:
-        raise ValueError(f"Error reading Excel file: {str(e)}")
-
-    holdings_df['PD_Date'] = pd.to_datetime(holdings_df['PD_Date'], dayfirst=True)
-
-    # with transaction.atomic():  # Use transaction to ensure data integrity
-    # Update prev Holding to Inactive state
-    SchemeUnderlyingHoldings.objects.all().update(is_active=False)
-    
-    holdings_df = holdings_df.dropna(subset=['SD_Scheme ISIN'])
-    underlying_holdings_create_list = []
-    for index, row in holdings_df.iterrows():
-        print(index, row["SD_Scheme AMFI Code"], pd.isna(row["SD_Scheme AMFI Code"]))
-        if pd.isna(row["SD_Scheme AMFI Code"]):
-            mf = AMCFundScheme.objects.filter(isin_number=row["SD_Scheme ISIN"]).first()
-        else:
-            mf = AMCFundScheme.objects.filter(amfi_scheme_code=row["SD_Scheme AMFI Code"], isin_number=row["SD_Scheme ISIN"]).first()
-        
-        if not mf:
-            mf = AMCFundScheme.objects.create(name=row["Scheme Name"], accord_scheme_name=row["Scheme Name"], amfi_scheme_code=0 if pd.isna(row["SD_Scheme AMFI Code"]) else row["SD_Scheme AMFI Code"], isin_number=row["SD_Scheme ISIN"])
-        
-        # Use helper function to find or create stock (consistent with Base Sheet processing)
-        holding, _ = find_or_create_stock(
-            name=row["PD_Instrument Name"],
-            isin=row.get("PD_Company ISIN no") if not pd.isna(row.get("PD_Company ISIN no")) else None,
-            bse_code=row.get("PD_BSE Code") if not pd.isna(row.get("PD_BSE Code")) else None,
-            nse_code=row.get("PD_NSE Symbol") if not pd.isna(row.get("PD_NSE Symbol")) else None
-        )
-        
-        holding_data = SchemeUnderlyingHoldings.objects.filter(amcfundscheme=mf, holding=holding, as_on_date=row["PD_Date"]).first()
-        if holding_data:
-            continue
-        data = SchemeUnderlyingHoldings()
-        data.amcfundscheme = mf
-        data.holding = holding
-        data.as_on_date = row["PD_Date"]
-        data.as_on_month_end = row["PD_Month End"]
-        data.weightage = row["PD_Holding (%)"]
-        data.no_of_shares = 0 if pd.isna(row["PD_No of Shares"]) else row["PD_No of Shares"]
-        underlying_holdings_create_list.append(data)
-    if underlying_holdings_create_list:
-        SchemeUnderlyingHoldings.objects.bulk_create(underlying_holdings_create_list)     
-    
-    return "Success"       
-
 
 def transform_scheme_name(original_name):
     """
@@ -593,298 +542,6 @@ def process_top_schemes_data_uploaded(excel_file):
 
     return "Done"
 
-def process_stocks_base_sheet(excel_file, user):
-    """
-    Process Base Sheet Excel file to update Stock and StockQuarterlyData models
-    
-    Args:
-        excel_file: The uploaded Excel file containing Base Sheet data
-        user: The user uploading the file
-        
-    Returns:
-        tuple: (stats, upload_log) containing processing statistics and upload log
-    """
-    from datetime import datetime as dt
-    
-    # Initialize statistics
-    stats = {
-        'stocks_added': 0,
-        'stocks_updated': 0,
-        'quarterly_records_added': 0,
-        'quarterly_records_updated': 0,
-        'errors': [],
-        'total_rows_processed': 0
-    }
-    
-    # Create upload log entry
-    upload_log = StockUploadLog.objects.create(
-        uploaded_by=user,
-        filename=excel_file.name,
-        file_size=excel_file.size,
-        status='processing',
-        processing_started_at=dt.now()
-    )
-    
-    try:
-        # Read Excel file with proper header handling
-        df_raw = pd.read_excel(excel_file, sheet_name='App-Base Sheet', header=None)
-        
-        # Set header row (row 8 in 1-indexed, which is index 7 in 0-indexed)
-        df_data = pd.read_excel(excel_file, sheet_name='App-Base Sheet', header=7)
-        
-        if df_data.empty:
-            raise ValueError("No data found in the Excel file")
-        
-        # Remove sample/test rows (rows with 'XX' or 'Sample' in S. No. column)
-        df_data = df_data[~df_data['S. No.'].astype(str).str.contains('XX|Sample', na=False, case=False)]
-        
-        stats['total_rows_processed'] = len(df_data)
-        
-        with transaction.atomic():
-            for index, row in df_data.iterrows():
-                try:
-                    # Process Stock data (static company information)
-                    stock_data = {
-                        'name': str(row['Company Name']).strip() if pd.notna(row['Company Name']) else '',
-                        'accord_code': str(row['Accord Code']).strip() if pd.notna(row['Accord Code']) else None,
-                        'sector': str(row['Sector']).strip() if pd.notna(row['Sector']) else None,
-                        'cap': str(row['Cap']).strip() if pd.notna(row['Cap']) else None,
-                        'free_float': _safe_decimal(row['Free Float']),
-                        'revenue_6yr_cagr': _safe_decimal(row['6 Year CAGR']),  # Column G
-                        'revenue_ttm': _safe_decimal(row['TTM']),  # Column H
-                        'pat_6yr_cagr': _safe_decimal(row['6 Year CAGR.1']),  # Column I
-                        'pat_ttm': _safe_decimal(row['TTM.1']),  # Column J
-                        'current_pr': _safe_decimal(row['Current']),  # Column K
-                        'pr_2yr_avg': _safe_decimal(row['2 Yr Avg']),  # Column L
-                        'reval_deval': _safe_decimal(row['Reval/deval']),  # Column M
-                    }
-                    
-                    # Extract codes from end columns
-                    if 'BSE Code' in df_data.columns:
-                        stock_data['bse_code'] = str(row['BSE Code']).strip() if pd.notna(row['BSE Code']) else None
-                    if 'NSE Code' in df_data.columns:
-                        stock_data['nse_code'] = str(row['NSE Code']).strip() if pd.notna(row['NSE Code']) else None
-                    if 'ISIN' in df_data.columns:
-                        stock_data['isin'] = str(row['ISIN']).strip() if pd.notna(row['ISIN']) else None
-                    
-                    # Use helper function to find or create stock
-                    stock, created = find_or_create_stock(
-                        name=stock_data['name'],
-                        isin=stock_data.get('isin'),
-                        bse_code=stock_data.get('bse_code'),
-                        nse_code=stock_data.get('nse_code'),
-                        symbol=stock_data.get('symbol'),
-                        # Pass all additional data fields
-                        accord_code=stock_data.get('accord_code'),
-                        sector=stock_data.get('sector'),
-                        cap=stock_data.get('cap'),
-                        free_float=stock_data.get('free_float'),
-                        revenue_6yr_cagr=stock_data.get('revenue_6yr_cagr'),
-                        revenue_ttm=stock_data.get('revenue_ttm'),
-                        pat_6yr_cagr=stock_data.get('pat_6yr_cagr'),
-                        pat_ttm=stock_data.get('pat_ttm'),
-                        current_pr=stock_data.get('current_pr'),
-                        pr_2yr_avg=stock_data.get('pr_2yr_avg'),
-                        reval_deval=stock_data.get('reval_deval')
-                    )
-                    
-                    if created:
-                        stats['stocks_added'] += 1
-                    else:
-                        stats['stocks_updated'] += 1
-                    
-                    # Process quarterly data (all date columns)
-                    date_columns = [col for col in df_data.columns if isinstance(col, dt)]
-                    
-                    for date_col in date_columns:
-                        if pd.notna(row[date_col]):
-                            # Determine which metric this date column represents
-                            col_index = df_data.columns.get_loc(date_col)
-                            metric_type = _determine_metric_type(col_index)
-                            
-                            # Create quarterly data entry
-                            quarterly_data = {
-                                'stock': stock,
-                                'quarter_date': date_col.date() if hasattr(date_col, 'date') else date_col,
-                                metric_type: _safe_decimal(row[date_col])
-                            }
-                            
-                            quarterly_obj, q_created = StockQuarterlyData.objects.update_or_create(
-                                stock=stock,
-                                quarter_date=quarterly_data['quarter_date'],
-                                defaults=quarterly_data
-                            )
-                            
-                            if q_created:
-                                stats['quarterly_records_added'] += 1
-                            else:
-                                stats['quarterly_records_updated'] += 1
-                    
-                    # Handle period format columns (YYYYMM format)
-                    period_columns = [col for col in df_data.columns if 
-                                    isinstance(col, str) and col.replace('.', '').isdigit() and len(col.replace('.', '')) == 6]
-                    
-                    for period_col in period_columns:
-                        if pd.notna(row[period_col]):
-                            # Convert period format to date (YYYYMM -> YYYY-MM-last_day)
-                            period_str = str(period_col).split('.')[0]  # Remove .1, .2 etc.
-                            if len(period_str) == 6:
-                                year = int(period_str[:4])
-                                month = int(period_str[4:6])
-                                
-                                # Create last day of month
-                                import calendar
-                                last_day = calendar.monthrange(year, month)[1]
-                                quarter_date = dt(year, month, last_day).date()
-                                
-                                col_index = df_data.columns.get_loc(period_col)
-                                metric_type = _determine_metric_type(col_index)
-                                
-                                quarterly_data = {
-                                    'stock': stock,
-                                    'quarter_date': quarter_date,
-                                    metric_type: _safe_decimal(row[period_col])
-                                }
-                                
-                                quarterly_obj, q_created = StockQuarterlyData.objects.update_or_create(
-                                    stock=stock,
-                                    quarter_date=quarter_date,
-                                    defaults=quarterly_data
-                                )
-                                
-                                if q_created:
-                                    stats['quarterly_records_added'] += 1
-                                else:
-                                    stats['quarterly_records_updated'] += 1
-                    
-                except Exception as e:
-                    error_msg = f"Error processing row {index + 1}: {str(e)}"
-                    stats['errors'].append(error_msg)
-                    continue
-        
-        # Update upload log with success
-        upload_log.status = 'completed'
-        upload_log.stocks_added = stats['stocks_added']
-        upload_log.stocks_updated = stats['stocks_updated']
-        upload_log.quarterly_records_added = stats['quarterly_records_added']
-        upload_log.quarterly_records_updated = stats['quarterly_records_updated']
-        upload_log.processing_completed_at = dt.now()
-        upload_log.processing_time = upload_log.processing_completed_at - upload_log.processing_started_at
-        upload_log.save()
-        
-    except Exception as e:
-        # Update upload log with failure
-        upload_log.status = 'failed'
-        upload_log.error_message = str(e)
-        upload_log.processing_completed_at = dt.now()
-        upload_log.processing_time = upload_log.processing_completed_at - upload_log.processing_started_at
-        upload_log.save()
-        raise e
-    
-    return stats, upload_log
-
-def find_or_create_stock(name, isin=None, bse_code=None, nse_code=None, symbol=None, **additional_data):
-    """
-    Find existing stock or create new one using multiple matching criteria
-    Priority order: ISIN -> BSE Code -> NSE Code -> Name
-    """
-    stock = None
-    created = False
-    
-    # Clean up input data
-    name = str(name).strip() if name else ''
-    isin = str(isin).strip() if isin and not pd.isna(isin) else None
-    bse_code = str(bse_code).strip() if bse_code and not pd.isna(bse_code) else None
-    nse_code = str(nse_code).strip() if nse_code and not pd.isna(nse_code) else None
-    symbol = str(symbol).strip() if symbol and not pd.isna(symbol) else None
-    
-    # Try to find existing stock using multiple criteria in priority order
-    if isin:
-        stock = Stock.objects.filter(isin=isin).first()
-    
-    if not stock and bse_code:
-        stock = Stock.objects.filter(bse_code=bse_code).first()
-    
-    if not stock and nse_code:
-        stock = Stock.objects.filter(nse_code=nse_code).first()
-    
-    if not stock and name:
-        stock = Stock.objects.filter(name__iexact=name).first()
-    
-    # Prepare stock data
-    stock_data = {
-        'name': name,
-        'isin': isin,
-        'bse_code': bse_code,
-        'nse_code': nse_code,
-        'symbol': symbol or nse_code or bse_code,  # Use NSE code, then BSE code as fallback
-        **additional_data
-    }
-    
-    # Remove None/empty values
-    stock_data = {k: v for k, v in stock_data.items() if v is not None and v != ''}
-    
-    if stock:
-        # Update existing stock with new data
-        for key, value in stock_data.items():
-            if value is not None and value != '':
-                setattr(stock, key, value)
-        stock.save()
-        created = False
-    else:
-        # Create new stock
-        stock = Stock.objects.create(**stock_data)
-        created = True
-    
-    return stock, created
-
-def _safe_decimal(value):
-    """Safely convert value to Decimal, return None if invalid"""
-    if pd.isna(value) or value == '' or value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
-
-def _determine_metric_type(col_index):
-    """Determine which metric type based on column index"""
-    # Based on the Excel structure analysis
-    if 14 <= col_index <= 41:  # Market Cap columns
-        return 'mcap'
-    elif 43 <= col_index <= 71:  # Free Float Market Cap columns  
-        return 'free_float_mcap'
-    elif 72 <= col_index <= 107:  # TTM Revenue columns
-        return 'ttm_revenue'
-    elif 108 <= col_index <= 143:  # TTM Revenue Free Float columns
-        return 'ttm_revenue_free_float'
-    elif 144 <= col_index <= 179:  # TTM PAT columns
-        return 'pat'
-    elif 180 <= col_index <= 215:  # TTM PAT Free Float columns
-        return 'ttm_pat_free_float'
-    elif 216 <= col_index <= 251:  # Quarterly Revenue columns
-        return 'quarterly_revenue'
-    elif 252 <= col_index <= 287:  # Quarterly Revenue Free Float columns
-        return 'quarterly_revenue_free_float'
-    elif 288 <= col_index <= 323:  # Quarterly PAT columns
-        return 'quarterly_pat'
-    elif 324 <= col_index <= 359:  # Quarterly PAT Free Float columns
-        return 'quarterly_pat_free_float'
-    elif 360 <= col_index <= 371:  # ROCE columns
-        return 'roce'
-    elif 372 <= col_index <= 383:  # ROE columns
-        return 'roe'
-    elif 384 <= col_index <= 395:  # Retention columns
-        return 'retention'
-    elif col_index == 396:  # Share Price column
-        return 'share_price'
-    elif 397 <= col_index <= 408:  # PR columns
-        return 'pr_quarterly'
-    elif 409 <= col_index <= 420:  # PE columns
-        return 'pe_quarterly'
-    else:
-        return 'mcap'  # Default fallback
-
 @login_required
 def process_amcfs_nav_and_returns(request):
     """
@@ -925,40 +582,10 @@ def process_amcfs_nav_and_returns(request):
                     except Exception as e:
                         print(str(e))
                         print(traceback.format_exc())
-                elif file_type == "underlying_holdings":
-                    # Process Underlying Holdings File
-                    stats = process_underlying_holdings_file(excel_file)
-                elif file_type == "stocks_base":
-                    # Process Stocks Base Sheet
-                    stats, upload_log = process_stocks_base_sheet(excel_file, request.user)
-                    
-                    # Create detailed success message
-                    success_message = (
-                        f"Base Sheet processed successfully! "
-                        f"Stocks added: {stats['stocks_added']}, "
-                        f"Stocks updated: {stats['stocks_updated']}, "
-                        f"Quarterly records added: {stats['quarterly_records_added']}, "
-                        f"Quarterly records updated: {stats['quarterly_records_updated']}"
-                    )
-                    
-                    if stats['errors']:
-                        success_message += f" (with {len(stats['errors'])} warnings)"
-                    
-                    messages.success(request, success_message)
-                    
-                    # Log any warnings
-                    if stats['errors']:
-                        for error in stats['errors'][:5]:  # Show first 5 errors
-                            messages.warning(request, f"Warning: {error}")
-                        
-                        if len(stats['errors']) > 5:
-                            messages.info(request, f"... and {len(stats['errors']) - 5} more warnings")
-                else:
-                    messages.success(request, "File uploaded and data processed successfully!")
+                
+                messages.success(request, "File uploaded and data processed successfully!")
 
             except Exception as e:
-                print(str(e))
-                print(traceback.format_exc())
                 messages.error(request, f"Error processing file: {str(e)}")
                 return render(request, 'gcia_app/upload_amcfs_excel.html', {'form': form})
 
@@ -1439,105 +1066,119 @@ def process_portfolio_valuation(request):
 def process_financial_planning(request):
     return render(request, 'gcia_app/financial_planning.html')
 
-# COMMENTED OUT - Upload Stock Data functionality disabled - duplicate imports removed
-# The required imports are already included at the top of the file
+# Add this to gcia_app/views.py
 
-# COMMENTED OUT - Upload Stock Data functionality disabled
-# @login_required
-# def upload_stock_data(request):
-#     """
-#     View to handle stock data Excel file upload and processing
-#     """
-#     form = StockDataUploadForm()
-#     recent_uploads = []
-#     
-#     # Get recent uploads for the current user
-#     if request.user.is_authenticated:
-#         recent_uploads = StockUploadLog.objects.filter(
-#             uploaded_by=request.user
-#         ).order_by('-uploaded_at')[:10]
-#     
-#     if request.method == 'POST' and request.FILES.get('excel_file'):
-#         form = StockDataUploadForm(request.POST, request.FILES)
-#         
-#         if form.is_valid():
-#             excel_file = request.FILES['excel_file']
-#             
-#             try:
-#                 # Create uploads directory if it doesn't exist
-#                 uploads_dir = os.path.join(settings.MEDIA_ROOT, 'uploads')
-#                 os.makedirs(uploads_dir, exist_ok=True)
-#                 
-#                 # Save file temporarily
-#                 file_path = default_storage.save(
-#                     f'uploads/{excel_file.name}',
-#                     ContentFile(excel_file.read())
-#                 )
-#                 
-#                 try:
-#                     # Process the file
-#                     with default_storage.open(file_path, 'rb') as stored_file:
-#                         # Create a temporary file for processing
-#                         with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
-#                             temp_file.write(stored_file.read())
-#                             temp_file.flush()
-#                             
-#                             # Reset file pointer
-#                             excel_file.seek(0)
-#                             
-#                             # Process the data
-#                             stats, upload_log = process_stock_data_file(excel_file, request.user)
-#                             
-#                             # Show success message with statistics
-#                             success_message = (
-#                                 f"File processed successfully! "
-#                                 f"Stocks added: {stats['stocks_added']}, "
-#                                 f"Stocks updated: {stats['stocks_updated']}, "
-#                                 f"Quarterly records added: {stats['quarterly_records_added']}, "
-#                                 f"Quarterly records updated: {stats['quarterly_records_updated']}"
-#                             )
-#                             
-#                             if stats['errors']:
-#                                 success_message += f" (with {len(stats['errors'])} warnings)"
-#                             
-#                             messages.success(request, success_message)
-#                             
-#                             # Log any warnings
-#                             if stats['errors']:
-#                                 for error in stats['errors'][:5]:  # Show first 5 errors
-#                                     messages.warning(request, f"Warning: {error}")
-#                                 
-#                                 if len(stats['errors']) > 5:
-#                                     messages.info(request, f"... and {len(stats['errors']) - 5} more warnings")
-#                 
-#                 except Exception as e:
-#                     logger.error(f"Error processing stock data file: {str(e)}")
-#                     logger.error(traceback.format_exc())
-#                     messages.error(request, f"Error processing file: {str(e)}")
-#                 
-#                 finally:
-#                     # Clean up temporary files
-#                     try:
-#                         default_storage.delete(file_path)
-#                         if 'temp_file' in locals():
-#                             os.unlink(temp_file.name)
-#                     except Exception as cleanup_error:
-#                         logger.warning(f"Error cleaning up files: {cleanup_error}")
-#                 
-#             except Exception as e:
-#                 logger.error(f"Error handling file upload: {str(e)}")
-#                 logger.error(traceback.format_exc())
-#                 messages.error(request, f"Error uploading file: {str(e)}")
-#             
-#             # Redirect to prevent form resubmission
-#             return redirect('upload_stock_data')
-#     
-#     context = {
-#         'form': form,
-#         'recent_uploads': recent_uploads,
-#     }
-#     
-#     return render(request, 'gcia_app/upload_stock_data.html', context)
+import os
+import tempfile
+from django.shortcuts import render, redirect
+from django.contrib.auth.decorators import login_required
+from django.contrib import messages
+from django.conf import settings
+from django.core.files.storage import default_storage
+from django.core.files.base import ContentFile
+from gcia_app.forms import StockDataUploadForm
+from gcia_app.models import StockUploadLog
+from gcia_app.stock_data_processor import process_stock_data_file
+import traceback
+import logging
+
+logger = logging.getLogger(__name__)
+
+@login_required
+def upload_stock_data(request):
+    """
+    View to handle stock data Excel file upload and processing
+    """
+    form = StockDataUploadForm()
+    recent_uploads = []
+    
+    # Get recent uploads for the current user
+    if request.user.is_authenticated:
+        recent_uploads = StockUploadLog.objects.filter(
+            uploaded_by=request.user
+        ).order_by('-uploaded_at')[:10]
+    
+    if request.method == 'POST' and request.FILES.get('excel_file'):
+        form = StockDataUploadForm(request.POST, request.FILES)
+        
+        if form.is_valid():
+            excel_file = request.FILES['excel_file']
+            
+            try:
+                # Create uploads directory if it doesn't exist
+                uploads_dir = os.path.join(settings.MEDIA_ROOT, 'uploads')
+                os.makedirs(uploads_dir, exist_ok=True)
+                
+                # Save file temporarily
+                file_path = default_storage.save(
+                    f'uploads/{excel_file.name}',
+                    ContentFile(excel_file.read())
+                )
+                
+                try:
+                    # Process the file
+                    with default_storage.open(file_path, 'rb') as stored_file:
+                        # Create a temporary file for processing
+                        with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as temp_file:
+                            temp_file.write(stored_file.read())
+                            temp_file.flush()
+                            
+                            # Reset file pointer
+                            excel_file.seek(0)
+                            
+                            # Process the data
+                            stats, upload_log = process_stock_data_file(excel_file, request.user)
+                            
+                            # Show success message with statistics
+                            success_message = (
+                                f"File processed successfully! "
+                                f"Stocks added: {stats['stocks_added']}, "
+                                f"Stocks updated: {stats['stocks_updated']}, "
+                                f"Quarterly records added: {stats['quarterly_records_added']}, "
+                                f"Quarterly records updated: {stats['quarterly_records_updated']}"
+                            )
+                            
+                            if stats['errors']:
+                                success_message += f" (with {len(stats['errors'])} warnings)"
+                            
+                            messages.success(request, success_message)
+                            
+                            # Log any warnings
+                            if stats['errors']:
+                                for error in stats['errors'][:5]:  # Show first 5 errors
+                                    messages.warning(request, f"Warning: {error}")
+                                
+                                if len(stats['errors']) > 5:
+                                    messages.info(request, f"... and {len(stats['errors']) - 5} more warnings")
+                
+                except Exception as e:
+                    logger.error(f"Error processing stock data file: {str(e)}")
+                    logger.error(traceback.format_exc())
+                    messages.error(request, f"Error processing file: {str(e)}")
+                
+                finally:
+                    # Clean up temporary files
+                    try:
+                        default_storage.delete(file_path)
+                        if 'temp_file' in locals():
+                            os.unlink(temp_file.name)
+                    except Exception as cleanup_error:
+                        logger.warning(f"Error cleaning up files: {cleanup_error}")
+                
+            except Exception as e:
+                logger.error(f"Error handling file upload: {str(e)}")
+                logger.error(traceback.format_exc())
+                messages.error(request, f"Error uploading file: {str(e)}")
+            
+            # Redirect to prevent form resubmission
+            return redirect('upload_stock_data')
+    
+    context = {
+        'form': form,
+        'recent_uploads': recent_uploads,
+    }
+    
+    return render(request, 'gcia_app/upload_stock_data.html', context)
 
 # Add this view to your existing gcia_app/views.py
 

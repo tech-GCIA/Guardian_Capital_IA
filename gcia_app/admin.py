@@ -6,11 +6,6 @@ import string
 import random
 from django.utils.crypto import get_random_string
 from django.contrib.auth.hashers import make_password
-from django.http import HttpResponse
-from datetime import datetime
-import pandas as pd
-import tempfile
-import os
 
 class ReadOnlyModelAdmin(admin.ModelAdmin):
     """Make all fields read-only for non-staff users."""
@@ -67,7 +62,7 @@ class CustomerAdmin(admin.ModelAdmin):
         
 class AMCFundSchemeAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
     search_fields = ['name']
-    list_display = ('amcfundscheme_id', 'name', 'isin_number', 'scheme_benchmark', 'is_active', 'latest_nav', 'latest_nav_as_on_date')
+    list_display = ('amcfundscheme_id', 'name', 'isin_div_or_growth_code', 'scheme_benchmark', 'is_active', 'latest_nav', 'latest_nav_as_on_date')
     readonly_fields = ['amcfundscheme_id', 'created', 'modified','assets_under_management']
 
     list_filter = ['is_active', 'is_direct_fund', 'is_scheme_benchmark']
@@ -89,24 +84,11 @@ class AMCFundSchemeNavLogAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
             return super(AMCFundSchemeNavLogAdmin, self).get_queryset(request).select_related('amcfundscheme')
         else:
             return super(AMCFundSchemeNavLogAdmin, self).get_queryset(request)
-        
-class SchemeUnderlyingHoldingsAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
-    search_fields = ['amcfundscheme__name', 'amcfundscheme__accord_scheme_name']
-    list_display = ('schemeunderlyingholding_id', 'amcfundscheme__name', 'holding__name', 'weightage')
-
-    raw_id_fields = ['amcfundscheme', 'holding']
-
-    def get_queryset(self, request):
-        if 'change' not in request.get_full_path():
-            return super(SchemeUnderlyingHoldingsAdmin, self).get_queryset(request).select_related('amcfundscheme', 'holding')
-        else:
-            return super(SchemeUnderlyingHoldingsAdmin, self).get_queryset(request)
 
 # Register the model with the custom admin class
 admin.site.register(Customer, CustomerAdmin)
 admin.site.register(AMCFundScheme, AMCFundSchemeAdmin)
 admin.site.register(AMCFundSchemeNavLog, AMCFundSchemeNavLogAdmin)
-admin.site.register(SchemeUnderlyingHoldings, SchemeUnderlyingHoldingsAdmin)
 
 # Add this to gcia_app/admin.py
 
@@ -183,146 +165,6 @@ class StockQuarterlyDataAdmin(admin.ModelAdmin):
         return f"Q{obj.quarter_number}-{obj.quarter_year}"
     quarter_label.short_description = 'Quarter'
     quarter_label.admin_order_field = 'quarter_year'
-    
-    actions = ['export_stocks_data_to_excel']
-    
-    def export_stocks_data_to_excel(self, request, queryset):
-        """
-        Admin action to export all stocks and quarterly data to Excel
-        in the same format as the Base Sheet upload
-        """
-        try:
-            # Get all stocks and their data
-            all_stocks = Stock.objects.filter(is_active=True).order_by('name')
-            
-            if not all_stocks.exists():
-                self.message_user(request, "No active stocks found to export.", level=messages.WARNING)
-                return
-            
-            # Create a temporary file for the Excel export
-            with tempfile.NamedTemporaryFile(suffix='.xlsx', delete=False) as tmp_file:
-                temp_path = tmp_file.name
-            
-            try:
-                # Create Excel writer
-                with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
-                    # Prepare data structure similar to Base Sheet
-                    export_data = []
-                    
-                    for idx, stock in enumerate(all_stocks, 1):
-                        # Get all quarterly data for this stock
-                        quarterly_data = StockQuarterlyData.objects.filter(
-                            stock=stock
-                        ).order_by('-quarter_date')
-                        
-                        # Create base row with stock information
-                        row_data = {
-                            'S. No.': idx,
-                            'Company Name': stock.name,
-                            'Accord Code': stock.accord_code or '',
-                            'Sector': stock.sector or '',
-                            'Cap': stock.cap or '',
-                            'Free Float': float(stock.free_float) if stock.free_float else '',
-                            '6 Year CAGR': float(stock.revenue_6yr_cagr) if stock.revenue_6yr_cagr else '',
-                            'TTM': float(stock.revenue_ttm) if stock.revenue_ttm else '',
-                            '6 Year CAGR.1': float(stock.pat_6yr_cagr) if stock.pat_6yr_cagr else '',
-                            'TTM.1': float(stock.pat_ttm) if stock.pat_ttm else '',
-                            'Current': float(stock.current_pr) if stock.current_pr else '',
-                            '2 Yr Avg': float(stock.pr_2yr_avg) if stock.pr_2yr_avg else '',
-                            'Reval/deval': float(stock.reval_deval) if stock.reval_deval else '',
-                            'BSE Code': stock.bse_code or '',
-                            'NSE Code': stock.nse_code or '',
-                            'ISIN': stock.isin or ''
-                        }
-                        
-                        # Add quarterly data columns
-                        for qdata in quarterly_data:
-                            date_key = qdata.quarter_date.strftime('%Y-%m-%d')
-                            
-                            # Add different metrics based on what's available
-                            if qdata.mcap:
-                                row_data[f'Market_Cap_{date_key}'] = float(qdata.mcap)
-                            if qdata.free_float_mcap:
-                                row_data[f'Free_Float_MCap_{date_key}'] = float(qdata.free_float_mcap)
-                            if qdata.ttm_revenue:
-                                row_data[f'TTM_Revenue_{date_key}'] = float(qdata.ttm_revenue)
-                            if qdata.pat:
-                                row_data[f'PAT_{date_key}'] = float(qdata.pat)
-                            if qdata.quarterly_revenue:
-                                row_data[f'Quarterly_Revenue_{date_key}'] = float(qdata.quarterly_revenue)
-                            if qdata.quarterly_pat:
-                                row_data[f'Quarterly_PAT_{date_key}'] = float(qdata.quarterly_pat)
-                            if qdata.roce:
-                                row_data[f'ROCE_{date_key}'] = float(qdata.roce)
-                            if qdata.roe:
-                                row_data[f'ROE_{date_key}'] = float(qdata.roe)
-                            if qdata.retention:
-                                row_data[f'Retention_{date_key}'] = float(qdata.retention)
-                            if qdata.share_price:
-                                row_data[f'Share_Price_{date_key}'] = float(qdata.share_price)
-                            if qdata.pr_quarterly:
-                                row_data[f'PR_{date_key}'] = float(qdata.pr_quarterly)
-                            if qdata.pe_quarterly:
-                                row_data[f'PE_{date_key}'] = float(qdata.pe_quarterly)
-                        
-                        export_data.append(row_data)
-                    
-                    # Create DataFrame
-                    df = pd.DataFrame(export_data)
-                    
-                    # Write to Excel with proper sheet name
-                    df.to_excel(writer, sheet_name='App-Base Sheet', index=False)
-                    
-                    # Get the worksheet to add headers
-                    worksheet = writer.sheets['App-Base Sheet']
-                    
-                    # Add multi-level headers similar to original format
-                    # Insert rows at the top for headers
-                    worksheet.insert_rows(1, 7)
-                    
-                    # Add header information
-                    worksheet['A6'] = 'Stock wise Fundamentals and Valuations'
-                    worksheet['A7'] = 'Revenue (Q1 FY-26)'
-                    worksheet['A8'] = 'S. No.'
-                    
-                # Read the file and create response
-                with open(temp_path, 'rb') as excel_file:
-                    response = HttpResponse(
-                        excel_file.read(),
-                        content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-                    )
-                    
-                    # Set filename for download
-                    filename = f"Stocks_Base_Sheet_Export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-                    response['Content-Disposition'] = f'attachment; filename="{filename}"'
-                    
-                # Clean up temporary file
-                os.unlink(temp_path)
-                
-                # Success message
-                self.message_user(
-                    request,
-                    f"Successfully exported {len(export_data)} stocks with their quarterly data.",
-                    level=messages.SUCCESS
-                )
-                
-                return response
-                
-            except Exception as e:
-                # Clean up temp file on error
-                if os.path.exists(temp_path):
-                    os.unlink(temp_path)
-                raise e
-                
-        except Exception as e:
-            self.message_user(
-                request,
-                f"Error exporting data: {str(e)}",
-                level=messages.ERROR
-            )
-            return
-    
-    export_stocks_data_to_excel.short_description = "Export all stocks data to Excel (Base Sheet format)"
 
 
 @admin.register(StockUploadLog)
