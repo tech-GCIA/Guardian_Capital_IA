@@ -3,7 +3,13 @@
 {% block title %}Fund Analysis Metrics{% endblock %}
 
 {% block content %}
-    <h1>Fund Analysis Metrics</h1>
+    <!-- Update Metrics Button -->
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1>Fund Analysis Metrics</h1>
+        <button id="update-metrics-btn" class="btn btn-success">
+            <i class="fas fa-calculator"></i> Update Metrics for MF
+        </button>
+    </div>
 
     <!-- Display Toast Notifications -->
     {% if messages %}
@@ -15,6 +21,70 @@
             {% endfor %}
         </div>
     {% endif %}
+
+    <!-- Progress Modal -->
+    <div class="modal fade" id="progressModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">
+                        <i class="fas fa-calculator"></i> Calculating Portfolio Metrics
+                    </h5>
+                </div>
+                <div class="modal-body">
+                    <div class="mb-3">
+                        <div class="d-flex justify-content-between">
+                            <span><strong>Overall Progress</strong></span>
+                            <span id="progress-text">0%</span>
+                        </div>
+                        <div class="progress mb-3" style="height: 25px;">
+                            <div id="progress-bar" class="progress-bar progress-bar-striped progress-bar-animated bg-success"
+                                 role="progressbar" style="width: 0%"></div>
+                        </div>
+                    </div>
+
+                    <div class="row">
+                        <div class="col-md-6">
+                            <div class="mb-2">
+                                <strong>Current Fund:</strong><br>
+                                <span id="current-fund" class="text-muted">-</span>
+                            </div>
+                        </div>
+                        <div class="col-md-6">
+                            <div class="mb-2">
+                                <strong>Current Stock:</strong><br>
+                                <span id="current-stock" class="text-muted">-</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="mb-3">
+                        <strong>Progress:</strong>
+                        <span id="processed-count">0</span> of <span id="total-count">0</span> funds processed
+                    </div>
+
+                    <div id="success-section" class="alert alert-success d-none">
+                        <i class="fas fa-check-circle"></i>
+                        <strong>Success!</strong> <span id="success-message">Portfolio metrics calculation completed successfully!</span>
+                    </div>
+
+                    <div id="error-section" class="alert alert-danger d-none">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <strong>Error:</strong> <span id="error-message"></span>
+                    </div>
+
+                    <div id="calculation-info" class="text-muted small">
+                        <i class="fas fa-info-circle"></i>
+                        This process calculates 22 portfolio analysis metrics for all underlying stocks across all available time periods.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button id="close-progress-btn" class="btn btn-secondary" disabled>Close</button>
+                    <button id="cancel-calculation-btn" class="btn btn-outline-danger" style="display: none;">Cancel</button>
+                </div>
+            </div>
+        </div>
+    </div>
 
     <div class="card">
         <div class="card-body">
@@ -131,6 +201,187 @@
                         }
                     }
                 });
+            }
+
+            // Portfolio Metrics Calculation functionality
+            const updateMetricsBtn = document.getElementById('update-metrics-btn');
+            let currentSessionId = null;
+            let progressInterval = null;
+
+            // Handle Update Metrics button click
+            if (updateMetricsBtn) {
+                updateMetricsBtn.addEventListener('click', function() {
+                    console.log('Update Metrics button clicked');
+
+                    // Show modal
+                    const progressModal = new bootstrap.Modal(document.getElementById('progressModal'));
+                    progressModal.show();
+
+                    // Reset progress display
+                    resetProgressDisplay();
+
+                    // Start calculation
+                    startMetricsCalculation();
+                });
+            }
+
+            function startMetricsCalculation() {
+                fetch('{% url "trigger_metrics_calculation" %}', {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRFToken': getCookie('csrftoken'),
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: 'limit_periods=' + encodeURIComponent('')
+                })
+                .then(response => response.json())
+                .then(data => {
+                    console.log('Calculation response:', data);
+                    if (data.success) {
+                        currentSessionId = data.session_id;
+                        startProgressPolling();
+                    } else {
+                        showError(data.error || 'Unknown error occurred');
+                        enableCloseButton();
+                    }
+                })
+                .catch(error => {
+                    console.error('Calculation error:', error);
+                    showError('Network error: ' + error.message);
+                    enableCloseButton();
+                });
+            }
+
+            function startProgressPolling() {
+                console.log('Starting progress polling for session:', currentSessionId);
+                progressInterval = setInterval(function() {
+                    if (currentSessionId) {
+                        fetch(`{% url "calculation_progress" "SESSION_ID" %}`.replace('SESSION_ID', currentSessionId))
+                        .then(response => response.json())
+                        .then(data => {
+                            console.log('Progress data:', data);
+
+                            if (data.error) {
+                                showError(data.error);
+                                stopProgressPolling();
+                                enableCloseButton();
+                                return;
+                            }
+
+                            updateProgressDisplay(
+                                data.progress_percentage || 0,
+                                data.current_fund_name || '-',
+                                data.current_stock_name || '-',
+                                data.processed_funds || 0,
+                                data.total_funds || 0
+                            );
+
+                            if (data.status === 'completed') {
+                                stopProgressPolling();
+                                showSuccess('Portfolio metrics calculation completed successfully!');
+                                enableCloseButton();
+                            } else if (data.status === 'failed') {
+                                stopProgressPolling();
+                                showError(data.error_message || 'Calculation failed');
+                                enableCloseButton();
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Progress polling error:', error);
+                        });
+                    }
+                }, 2000); // Poll every 2 seconds
+            }
+
+            function updateProgressDisplay(percentage, currentFund, currentStock, processed, total) {
+                document.getElementById('progress-bar').style.width = percentage + '%';
+                document.getElementById('progress-text').textContent = Math.round(percentage) + '%';
+                document.getElementById('current-fund').textContent = currentFund;
+                document.getElementById('current-stock').textContent = currentStock;
+                document.getElementById('processed-count').textContent = processed;
+                document.getElementById('total-count').textContent = total;
+            }
+
+            function resetProgressDisplay() {
+                updateProgressDisplay(0, '-', '-', 0, 0);
+                document.getElementById('success-section').classList.add('d-none');
+                document.getElementById('error-section').classList.add('d-none');
+                document.getElementById('close-progress-btn').disabled = true;
+                document.getElementById('cancel-calculation-btn').style.display = 'inline-block';
+            }
+
+            function showError(message) {
+                document.getElementById('error-message').textContent = message;
+                document.getElementById('error-section').classList.remove('d-none');
+                document.getElementById('cancel-calculation-btn').style.display = 'none';
+            }
+
+            function showSuccess(message) {
+                document.getElementById('success-message').textContent = message;
+                document.getElementById('success-section').classList.remove('d-none');
+                document.getElementById('progress-text').textContent = '100% - Completed!';
+                document.getElementById('current-fund').textContent = 'All funds processed';
+                document.getElementById('current-stock').textContent = 'Calculation complete';
+                document.getElementById('cancel-calculation-btn').style.display = 'none';
+            }
+
+            function stopProgressPolling() {
+                if (progressInterval) {
+                    clearInterval(progressInterval);
+                    progressInterval = null;
+                }
+            }
+
+            function enableCloseButton() {
+                document.getElementById('close-progress-btn').disabled = false;
+            }
+
+            // Handle close button
+            document.getElementById('close-progress-btn').addEventListener('click', function() {
+                stopProgressPolling();
+                const progressModal = bootstrap.Modal.getInstance(document.getElementById('progressModal'));
+                if (progressModal) {
+                    progressModal.hide();
+                }
+            });
+
+            // Handle cancel button
+            document.getElementById('cancel-calculation-btn').addEventListener('click', function() {
+                if (currentSessionId) {
+                    fetch(`{% url "cancel_calculation" "SESSION_ID" %}`.replace('SESSION_ID', currentSessionId), {
+                        method: 'POST',
+                        headers: {
+                            'X-CSRFToken': getCookie('csrftoken'),
+                        }
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data.success) {
+                            showError('Calculation cancelled by user');
+                            stopProgressPolling();
+                            enableCloseButton();
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Cancel error:', error);
+                    });
+                }
+            });
+
+            // Helper function to get CSRF token
+            function getCookie(name) {
+                let cookieValue = null;
+                if (document.cookie && document.cookie !== '') {
+                    const cookies = document.cookie.split(';');
+                    for (let i = 0; i < cookies.length; i++) {
+                        const cookie = cookies[i].trim();
+                        if (cookie.substring(0, name.length + 1) === (name + '=')) {
+                            cookieValue = decodeURIComponent(cookie.substring(name.length + 1));
+                            break;
+                        }
+                    }
+                }
+                return cookieValue;
             }
 
             // Handle download button click

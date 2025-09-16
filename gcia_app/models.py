@@ -108,6 +108,31 @@ class AMCFundScheme(models.Model):
 	up_capture = models.FloatField(null=True, blank=True)
 	down_capture = models.FloatField(null=True, blank=True)
 
+	# Latest Portfolio Analysis Metrics (from most recent calculation)
+	latest_patm = models.FloatField(null=True, blank=True, verbose_name='Latest PATM')
+	latest_qoq_growth = models.FloatField(null=True, blank=True, verbose_name='Latest QoQ Growth')
+	latest_yoy_growth = models.FloatField(null=True, blank=True, verbose_name='Latest YoY Growth')
+	latest_revenue_6yr_cagr = models.FloatField(null=True, blank=True, verbose_name='Latest Revenue 6Y CAGR')
+	latest_pat_6yr_cagr = models.FloatField(null=True, blank=True, verbose_name='Latest PAT 6Y CAGR')
+	latest_current_pe = models.FloatField(null=True, blank=True, verbose_name='Latest Current PE')
+	latest_pe_2yr_avg = models.FloatField(null=True, blank=True, verbose_name='Latest PE 2Y Avg')
+	latest_pe_5yr_avg = models.FloatField(null=True, blank=True, verbose_name='Latest PE 5Y Avg')
+	latest_pe_2yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Latest PE 2Y Reval/Deval')
+	latest_pe_5yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Latest PE 5Y Reval/Deval')
+	latest_current_pr = models.FloatField(null=True, blank=True, verbose_name='Latest Current PR')
+	latest_pr_2yr_avg = models.FloatField(null=True, blank=True, verbose_name='Latest PR 2Y Avg')
+	latest_pr_5yr_avg = models.FloatField(null=True, blank=True, verbose_name='Latest PR 5Y Avg')
+	latest_pr_2yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Latest PR 2Y Reval/Deval')
+	latest_pr_5yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Latest PR 5Y Reval/Deval')
+	latest_pr_10q_low = models.FloatField(null=True, blank=True, verbose_name='Latest PR 10Q Low')
+	latest_pr_10q_high = models.FloatField(null=True, blank=True, verbose_name='Latest PR 10Q High')
+	latest_alpha_bond_cagr = models.FloatField(null=True, blank=True, verbose_name='Latest Alpha Bond CAGR')
+	latest_alpha_absolute = models.FloatField(null=True, blank=True, verbose_name='Latest Alpha Absolute')
+	latest_pe_yield = models.FloatField(null=True, blank=True, verbose_name='Latest PE Yield')
+	latest_growth_rate = models.FloatField(null=True, blank=True, verbose_name='Latest Growth Rate')
+	latest_bond_rate = models.FloatField(null=True, blank=True, verbose_name='Latest Bond Rate')
+	metrics_last_updated = models.DateTimeField(null=True, blank=True, verbose_name='Metrics Last Updated')
+
 	created = models.DateTimeField(auto_now_add=True)
 	modified = models.DateTimeField(auto_now=True)
 
@@ -283,3 +308,79 @@ class FundHolding(models.Model):
 
 	def __str__(self):
 		return f"{self.scheme.name} holds {self.holding_percentage}% of {self.stock.company_name}"
+
+class FundMetricsLog(models.Model):
+	"""
+	Stores calculated portfolio analysis metrics for each stock in each fund across all periods
+	"""
+	fund_metrics_log_id = models.AutoField(primary_key=True)
+	scheme = models.ForeignKey(AMCFundScheme, on_delete=models.CASCADE, related_name='metrics_logs')
+	stock = models.ForeignKey(Stock, on_delete=models.CASCADE, related_name='fund_metrics')
+	period_date = models.DateField(verbose_name='Period Date')
+	period_type = models.CharField(max_length=20, verbose_name='Period Type')  # 'quarterly', 'ttm', 'annual'
+
+	# 22 Calculated Portfolio Analysis Metrics
+	patm = models.FloatField(null=True, blank=True, verbose_name='Profit After Tax Margin')
+	qoq_growth = models.FloatField(null=True, blank=True, verbose_name='Quarter over Quarter Growth')
+	yoy_growth = models.FloatField(null=True, blank=True, verbose_name='Year over Year Growth')
+	revenue_6yr_cagr = models.FloatField(null=True, blank=True, verbose_name='Revenue 6 Year CAGR')
+	pat_6yr_cagr = models.FloatField(null=True, blank=True, verbose_name='PAT 6 Year CAGR')
+	current_pe = models.FloatField(null=True, blank=True, verbose_name='Current PE')
+	pe_2yr_avg = models.FloatField(null=True, blank=True, verbose_name='PE 2 Year Average')
+	pe_5yr_avg = models.FloatField(null=True, blank=True, verbose_name='PE 5 Year Average')
+	pe_2yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='PE 2 Year Reval/Deval')
+	pe_5yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='PE 5 Year Reval/Deval')
+	current_pr = models.FloatField(null=True, blank=True, verbose_name='Current Price to Revenue')
+	pr_2yr_avg = models.FloatField(null=True, blank=True, verbose_name='PR 2 Year Average')
+	pr_5yr_avg = models.FloatField(null=True, blank=True, verbose_name='PR 5 Year Average')
+	pr_2yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='PR 2 Year Reval/Deval')
+	pr_5yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='PR 5 Year Reval/Deval')
+	pr_10q_low = models.FloatField(null=True, blank=True, verbose_name='PR 10 Quarter Low')
+	pr_10q_high = models.FloatField(null=True, blank=True, verbose_name='PR 10 Quarter High')
+	alpha_bond_cagr = models.FloatField(null=True, blank=True, verbose_name='Alpha over Bond CAGR')
+	alpha_absolute = models.FloatField(null=True, blank=True, verbose_name='Alpha Absolute')
+	pe_yield = models.FloatField(null=True, blank=True, verbose_name='PE Yield')
+	growth_rate = models.FloatField(null=True, blank=True, verbose_name='Growth Rate')
+	bond_rate = models.FloatField(null=True, blank=True, verbose_name='Bond Rate')
+
+	created = models.DateTimeField(auto_now_add=True)
+	modified = models.DateTimeField(auto_now=True)
+
+	class Meta:
+		unique_together = ['scheme', 'stock', 'period_date', 'period_type']
+		verbose_name = "Fund Metrics Log"
+		verbose_name_plural = "Fund Metrics Logs"
+		# Removed default ordering to prevent Django from applying period_date ordering to wrong models
+		# ordering = ['-period_date', 'scheme', 'stock']
+		indexes = [
+			models.Index(fields=['scheme', 'period_date']),
+			models.Index(fields=['stock', 'period_date']),
+			models.Index(fields=['scheme', 'stock', 'period_date']),
+		]
+
+	def __str__(self):
+		return f"{self.scheme.name} - {self.stock.company_name} - {self.period_date}"
+
+class MetricsCalculationSession(models.Model):
+	"""
+	Tracks progress of metrics calculation sessions for real-time updates
+	"""
+	session_id = models.CharField(max_length=255, unique=True, verbose_name='Session ID')
+	user = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='calculation_sessions')
+	total_funds = models.IntegerField(verbose_name='Total Funds')
+	processed_funds = models.IntegerField(default=0, verbose_name='Processed Funds')
+	current_fund_name = models.CharField(max_length=500, blank=True, verbose_name='Current Fund')
+	current_stock_name = models.CharField(max_length=500, blank=True, verbose_name='Current Stock')
+	status = models.CharField(max_length=50, verbose_name='Status')  # 'started', 'processing', 'completed', 'failed'
+	progress_percentage = models.FloatField(default=0.0, verbose_name='Progress Percentage')
+	error_message = models.TextField(blank=True, null=True, verbose_name='Error Message')
+	started_at = models.DateTimeField(auto_now_add=True)
+	completed_at = models.DateTimeField(null=True, blank=True)
+
+	class Meta:
+		verbose_name = "Metrics Calculation Session"
+		verbose_name_plural = "Metrics Calculation Sessions"
+		ordering = ['-started_at']
+
+	def __str__(self):
+		return f"Session {self.session_id} - {self.status} ({self.progress_percentage:.1f}%)"

@@ -1838,15 +1838,19 @@ def fund_analysis_metrics_view(request):
 def download_fund_metrics(request, scheme_id):
     """
     Download Excel file with fund holdings integrated into stock structure (Portfolio Analysis format)
-    Uses complete 431-column structure: ALL 426 stock columns + 5 fund columns
-    Preserves every single stock data column without loss
+    Enhanced with calculated portfolio analysis metrics and dynamic column structure
+    Includes all 22 calculated metrics for each period and portfolio-level summary
     """
     from openpyxl import Workbook
-    from openpyxl.styles import Font, Alignment
+    from openpyxl.styles import Font, Alignment, PatternFill
     from django.utils import timezone
     from io import BytesIO
-    from .header_mapping import get_full_fund_integrated_headers, get_complete_fund_column_mapping
+    from .metrics_calculator import DynamicHeaderGenerator
+    from .models import FundMetricsLog
     from datetime import datetime
+    import logging
+
+    logger = logging.getLogger(__name__)
 
     try:
         # Get the selected fund scheme
@@ -1862,391 +1866,248 @@ def download_fund_metrics(request, scheme_id):
             messages.error(request, f"No holdings data found for {scheme.name}")
             return redirect('fund_analysis_metrics')
 
+        logger.info(f"Generating Portfolio Analysis Excel for {scheme.name} with {holdings.count()} holdings")
+
         # Create workbook with Portfolio Analysis format
         wb = Workbook()
         ws = wb.active
-        ws.title = "Portfolio Analysis"  # Generic title, not fund-specific
+        ws.title = "Portfolio Analysis"
 
-        # Get COMPLETE header structure (431 columns: ALL stock data + fund columns)
-        integrated_headers = get_full_fund_integrated_headers()
-        column_mapping = get_complete_fund_column_mapping()
+        # Generate dynamic headers and available periods
+        header_generator = DynamicHeaderGenerator()
+        available_periods = header_generator.get_available_periods_for_fund(scheme)
+
+        logger.info(f"Available periods: {len(available_periods['all'])} total periods")
+
+        # Create dynamic headers structure
+        dynamic_headers = header_generator.generate_dynamic_headers(available_periods)
+
+        # Calculate total columns dynamically
+        total_columns = len(dynamic_headers['row_3'])
+        logger.info(f"Generated {total_columns} columns dynamically")
+
+        # Add professional 8-row header structure
+        portfolio_date = holdings.first().holding_date if holdings.first().holding_date else datetime.now().date()
 
         # ROW 1: Fund name only
-        row_1 = integrated_headers['row_1'].copy()
+        row_1 = [''] * total_columns
         row_1[0] = scheme.name
         ws.append(row_1)
 
-        # ROW 2: Column numbers (professional format)
-        ws.append(integrated_headers['row_2'])
+        # ROW 2: Column position indicators
+        row_2 = [''] * total_columns
+        for i in range(total_columns):
+            row_2[i] = f"Col_{i+1}"
+        ws.append(row_2)
 
-        # ROW 3: Portfolio date + header content
-        row_3 = integrated_headers['row_3'].copy()
-        portfolio_date = holdings.first().holding_date if holdings.first().holding_date else datetime.now().date()
-        row_3[0] = f"Portfolio as on: {portfolio_date.strftime('%dth %B %Y')}"
+        # ROW 3: Portfolio date + main headers
+        row_3 = dynamic_headers['row_3'].copy()
+        row_3[0] = f"Portfolio as on: {portfolio_date.strftime('%d %B %Y')}"
         ws.append(row_3)
 
-        # ROW 4-7: Professional header structure (ALL preserved)
-        ws.append(integrated_headers['row_4'])
-        ws.append(integrated_headers['row_5'])
-        ws.append(integrated_headers['row_6'])
-        ws.append(integrated_headers['row_7'])
+        # ROW 4-7: Additional header structure
+        for row_num in ['row_4', 'row_5', 'row_6', 'row_7']:
+            if row_num in dynamic_headers:
+                ws.append(dynamic_headers[row_num])
+            else:
+                ws.append([''] * total_columns)
 
-        # ROW 8: Build comprehensive column headers (431 columns)
-        headers_row = [''] * 431
+        # Use enhanced Excel export functionality
+        from .enhanced_excel_export import generate_enhanced_portfolio_analysis_excel
 
-        # Fund-integrated basic columns (0-16)
-        fund_columns = column_mapping['fund_integrated_columns']
-        for i, header in enumerate(fund_columns):
-            if i < len(headers_row):
-                headers_row[i] = header
+        logger.info("Using enhanced Excel export with calculated metrics")
+        excel_content = generate_enhanced_portfolio_analysis_excel(scheme)
 
-        # Market cap dates - ALL preserved
-        market_cap_dates = column_mapping['market_cap_dates']
-        start_pos = column_mapping['market_cap_start']
-        for i, date in enumerate(market_cap_dates):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = date
-
-        # Market cap free float dates - ALL preserved
-        start_pos = column_mapping['market_cap_ff_start']
-        for i, date in enumerate(market_cap_dates):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = date
-
-        # TTM periods for various sections - ALL preserved
-        ttm_periods = column_mapping['ttm_periods']
-
-        # TTM Revenue - ALL periods preserved
-        start_pos = column_mapping['ttm_revenue_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        # TTM Revenue Free Float - ALL periods preserved
-        start_pos = column_mapping['ttm_revenue_ff_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        # TTM PAT - ALL periods preserved
-        start_pos = column_mapping['ttm_pat_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        # TTM PAT Free Float - ALL periods preserved
-        start_pos = column_mapping['ttm_pat_ff_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        # Quarterly sections - ALL periods preserved
-        start_pos = column_mapping['qtr_revenue_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        start_pos = column_mapping['qtr_revenue_ff_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        start_pos = column_mapping['qtr_pat_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        start_pos = column_mapping['qtr_pat_ff_start']
-        for i, period in enumerate(ttm_periods):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = period
-
-        # Annual ratios - ALL years preserved
-        annual_years = column_mapping['annual_years']
-
-        # ROCE - ALL years preserved
-        start_pos = column_mapping['roce_start']
-        for i, year in enumerate(annual_years):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = year
-
-        # ROE - ALL years preserved
-        start_pos = column_mapping['roe_start']
-        for i, year in enumerate(annual_years):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = year
-
-        # Retention - ALL years preserved
-        start_pos = column_mapping['retention_start']
-        for i, year in enumerate(annual_years):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = year
-
-        # Price data - ALL dates preserved
-        price_dates = column_mapping['price_dates']
-
-        # Share prices - ALL dates preserved
-        start_pos = column_mapping['share_price_start']
-        for i, date in enumerate(price_dates):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = date
-
-        # PE ratios - ALL dates preserved
-        start_pos = column_mapping['pe_ratio_start']
-        for i, date in enumerate(price_dates):
-            pos = start_pos + i
-            if pos < len(headers_row):
-                headers_row[pos] = f"PE_{date}"
-
-        # Identifiers - ALL preserved
-        start_pos = column_mapping['identifiers_start']
-        if start_pos < len(headers_row):
-            headers_row[start_pos] = 'BSE Code'
-        if start_pos + 1 < len(headers_row):
-            headers_row[start_pos + 1] = 'NSE Code'
-        if start_pos + 2 < len(headers_row):
-            headers_row[start_pos + 2] = 'ISIN'
-
-        ws.append(headers_row)
-
-        # Add fund holding data with integrated stock metrics
-        for holding in holdings:
-            stock = holding.stock
-            row_data = [''] * 431  # 431 columns: 426 stock + 5 fund
-
-            # Calculate fund-specific values
-            weights = (holding.holding_percentage / 100) if holding.holding_percentage else 0
-            value = holding.market_value if holding.market_value else 0
-            num_shares = holding.number_of_shares if holding.number_of_shares else 0
-
-            # Get latest stock price
-            latest_price = stock.price_data.order_by('-price_date').first()
-            share_price = latest_price.share_price if latest_price else 0
-
-            # Calculate market cap (if available from stock data)
-            latest_market_cap = stock.market_cap_data.order_by('-date').first()
-            market_cap = latest_market_cap.market_cap if latest_market_cap else 0
-
-            # Calculate factor (example formula - adjust as needed)
-            factor = 0
-            if market_cap and market_cap > 0:
-                factor = weights / (market_cap / 1000000)  # Adjust scale as needed
-
-            # Populate fund-integrated basic columns (0-16)
-            row_data[0] = stock.company_name              # Company Name
-            row_data[1] = stock.accord_code               # Accord Code
-            row_data[2] = stock.sector                    # Sector
-            row_data[3] = stock.cap                       # Cap
-            row_data[4] = market_cap                      # Market Cap (FUND INTEGRATED)
-            row_data[5] = weights                         # Weights (FUND INTEGRATED)
-            row_data[6] = factor                          # Factor (FUND INTEGRATED)
-            row_data[7] = value                           # Value (FUND INTEGRATED)
-            row_data[8] = num_shares                      # No.of shares (FUND INTEGRATED)
-            row_data[9] = stock.free_float                # Free Float (shifted by +5)
-            row_data[10] = stock.revenue_6yr_cagr         # 6 Year CAGR Revenue (shifted by +5)
-            row_data[11] = stock.revenue_ttm              # TTM Revenue (shifted by +5)
-            row_data[12] = stock.pat_6yr_cagr             # 6 Year CAGR PAT (shifted by +5)
-            row_data[13] = stock.pat_ttm                  # TTM PAT (shifted by +5)
-            row_data[14] = stock.current_value            # Current (shifted by +5)
-            row_data[15] = stock.two_yr_avg               # 2 Yr Avg (shifted by +5)
-            row_data[16] = stock.reval_deval              # Reval/deval (shifted by +5)
-
-            # Populate ALL stock data - NO LIMITS, ALL PRESERVED
-            # Market cap data - ALL dates preserved
-            market_cap_data = {}
-            for mc in stock.market_cap_data.all():
-                market_cap_data[mc.date.strftime('%Y-%m-%d')] = mc.market_cap
-
-            start_pos = column_mapping['market_cap_start']
-            for idx, date_str in enumerate(market_cap_dates):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    row_data[pos] = market_cap_data.get(date_str)
-
-            # Market cap free float data - ALL dates preserved
-            market_cap_ff_data = {}
-            for mc in stock.market_cap_data.all():
-                market_cap_ff_data[mc.date.strftime('%Y-%m-%d')] = mc.market_cap_free_float
-
-            start_pos = column_mapping['market_cap_ff_start']
-            for idx, date_str in enumerate(market_cap_dates):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    row_data[pos] = market_cap_ff_data.get(date_str)
-
-            # TTM data - ALL periods preserved
-            ttm_data = {}
-            for ttm in stock.ttm_data.all():
-                ttm_data[ttm.period] = ttm
-
-            # TTM Revenue - ALL periods preserved
-            start_pos = column_mapping['ttm_revenue_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    ttm_obj = ttm_data.get(period)
-                    row_data[pos] = ttm_obj.ttm_revenue if ttm_obj else None
-
-            # TTM Revenue Free Float - ALL periods preserved
-            start_pos = column_mapping['ttm_revenue_ff_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    ttm_obj = ttm_data.get(period)
-                    row_data[pos] = ttm_obj.ttm_revenue_free_float if ttm_obj else None
-
-            # TTM PAT - ALL periods preserved
-            start_pos = column_mapping['ttm_pat_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    ttm_obj = ttm_data.get(period)
-                    row_data[pos] = ttm_obj.ttm_pat if ttm_obj else None
-
-            # TTM PAT Free Float - ALL periods preserved
-            start_pos = column_mapping['ttm_pat_ff_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    ttm_obj = ttm_data.get(period)
-                    row_data[pos] = ttm_obj.ttm_pat_free_float if ttm_obj else None
-
-            # Quarterly data - ALL periods preserved
-            quarterly_data = {}
-            for qtr in stock.quarterly_data.all():
-                quarterly_data[qtr.period] = qtr
-
-            # Quarterly Revenue - ALL periods preserved
-            start_pos = column_mapping['qtr_revenue_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    qtr_obj = quarterly_data.get(period)
-                    row_data[pos] = qtr_obj.quarterly_revenue if qtr_obj else None
-
-            # Quarterly Revenue Free Float - ALL periods preserved
-            start_pos = column_mapping['qtr_revenue_ff_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    qtr_obj = quarterly_data.get(period)
-                    row_data[pos] = qtr_obj.quarterly_revenue_free_float if qtr_obj else None
-
-            # Quarterly PAT - ALL periods preserved
-            start_pos = column_mapping['qtr_pat_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    qtr_obj = quarterly_data.get(period)
-                    row_data[pos] = qtr_obj.quarterly_pat if qtr_obj else None
-
-            # Quarterly PAT Free Float - ALL periods preserved
-            start_pos = column_mapping['qtr_pat_ff_start']
-            for idx, period in enumerate(ttm_periods):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    qtr_obj = quarterly_data.get(period)
-                    row_data[pos] = qtr_obj.quarterly_pat_free_float if qtr_obj else None
-
-            # Annual ratios - ALL years preserved
-            annual_data = {}
-            for ratio in stock.annual_ratios.all():
-                annual_data[ratio.financial_year] = ratio
-
-            # ROCE - ALL years preserved
-            start_pos = column_mapping['roce_start']
-            for idx, year in enumerate(annual_years):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    ratio_obj = annual_data.get(year)
-                    row_data[pos] = ratio_obj.roce_percentage if ratio_obj else None
-
-            # ROE - ALL years preserved
-            start_pos = column_mapping['roe_start']
-            for idx, year in enumerate(annual_years):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    ratio_obj = annual_data.get(year)
-                    row_data[pos] = ratio_obj.roe_percentage if ratio_obj else None
-
-            # Retention - ALL years preserved
-            start_pos = column_mapping['retention_start']
-            for idx, year in enumerate(annual_years):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    ratio_obj = annual_data.get(year)
-                    row_data[pos] = ratio_obj.retention_percentage if ratio_obj else None
-
-            # Price data - ALL dates preserved
-            price_data = {}
-            pe_data = {}
-            for price in stock.price_data.all():
-                price_data[price.price_date.strftime('%Y-%m-%d')] = price.share_price
-                pe_data[price.price_date.strftime('%Y-%m-%d')] = price.pe_ratio
-
-            # Share prices - ALL dates preserved
-            start_pos = column_mapping['share_price_start']
-            for idx, date_str in enumerate(price_dates):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    row_data[pos] = price_data.get(date_str)
-
-            # PE ratios - ALL dates preserved
-            start_pos = column_mapping['pe_ratio_start']
-            for idx, date_str in enumerate(price_dates):
-                pos = start_pos + idx
-                if pos < len(row_data):
-                    row_data[pos] = pe_data.get(date_str)
-
-            # Identifiers - ALL preserved
-            start_pos = column_mapping['identifiers_start']
-            if start_pos < len(row_data):
-                row_data[start_pos] = stock.bse_code
-            if start_pos + 1 < len(row_data):
-                row_data[start_pos + 1] = stock.nse_symbol
-            if start_pos + 2 < len(row_data):
-                row_data[start_pos + 2] = stock.isin
-
-            ws.append(row_data)
-
-        # Save to BytesIO buffer
-        excel_buffer = BytesIO()
-        wb.save(excel_buffer)
-        excel_content = excel_buffer.getvalue()
-        excel_buffer.close()
-
-        # Create response with generic filename
+        # Return the Excel file
         response = HttpResponse(
-            excel_content,
+            excel_content.getvalue(),
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
-        filename = f"portfolio_analysis_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        filename = f"{scheme.name}_Portfolio_Analysis_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
+        logger.info(f"Enhanced Excel file generated: {filename}")
         return response
 
     except AMCFundScheme.DoesNotExist:
         messages.error(request, "Fund not found or inactive")
         return redirect('fund_analysis_metrics')
     except Exception as e:
-        print(f"Error in download_fund_metrics: {e}")
+        logger.error(f"Error in enhanced download_fund_metrics: {e}")
+        print(f"Error in enhanced download_fund_metrics: {e}")
         print(traceback.format_exc())
-        messages.error(request, f"Error generating fund metrics file: {e}")
+        messages.error(request, f"Error generating enhanced fund metrics file: {e}")
         return redirect('fund_analysis_metrics')
+# Portfolio Metrics Calculation Views
+import uuid
+import json
+from django.http import JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+from .metrics_calculator import PortfolioMetricsCalculator
+from .models import MetricsCalculationSession, Customer
 
+@login_required
+@require_http_methods(["POST"])
+def trigger_metrics_calculation(request):
+    """
+    Trigger real-time metrics calculation with progress tracking
+    """
+
+    try:
+        # Get parameters from request
+        limit_periods = request.POST.get('limit_periods')
+
+        # Parse limit_periods if provided
+        limit_params = None
+        if limit_periods:
+            try:
+                limit_params = json.loads(limit_periods)
+            except (json.JSONDecodeError, ValueError):
+                # If parsing fails, ignore limits
+                limit_params = None
+
+        # Generate session ID for tracking
+        session_id = str(uuid.uuid4())
+
+        # Create progress session immediately for tracking
+        from gcia_app.models import AMCFundScheme, MetricsCalculationSession
+
+        # Count funds first
+        funds_with_holdings = AMCFundScheme.objects.filter(
+            holdings__isnull=False, is_active=True
+        ).distinct()
+        total_funds = funds_with_holdings.count()
+
+        # Create session for immediate progress tracking
+        progress_session = MetricsCalculationSession.objects.create(
+            session_id=session_id,
+            user=request.user,
+            total_funds=total_funds,
+            status='started'
+        )
+
+        # Start calculation in background using threading
+        import threading
+        def run_calculation():
+            try:
+                calculator = PortfolioMetricsCalculator(
+                    session_id=session_id,
+                    user=request.user
+                )
+                # Set the pre-created session
+                calculator.progress_session = progress_session
+                calculator.calculate_metrics_for_all_funds(limit_params)
+            except Exception as e:
+                # Update session with error
+                progress_session.status = 'failed'
+                progress_session.error_message = str(e)
+                progress_session.save()
+
+        # Start calculation thread
+        calc_thread = threading.Thread(target=run_calculation)
+        calc_thread.daemon = True
+        calc_thread.start()
+
+        return JsonResponse({
+            'success': True,
+            'session_id': session_id,
+            'message': 'Metrics calculation started in background',
+            'total_funds': total_funds
+        })
+
+    except Exception as e:
+        error_message = str(e)
+        full_traceback = traceback.format_exc()
+
+        print(f"Error in trigger_metrics_calculation: {error_message}")
+        print(f"Full traceback: {full_traceback}")
+
+        # Special handling for period_date field errors
+        if "Cannot resolve keyword 'period_date'" in error_message:
+            print("*** PERIOD_DATE ERROR DETECTED ***")
+            print(f"Error details: {error_message}")
+            print("This error occurs when Django ORM tries to use 'period_date' field on StockTTMData or StockQuarterlyData models")
+            print("These models only have 'period' field, not 'period_date'")
+
+        return JsonResponse({
+            'success': False,
+            'session_id': session_id if 'session_id' in locals() else None,
+            'error': error_message,
+            'traceback': full_traceback if 'DEBUG' in globals() else None
+        })
+
+@login_required
+def get_calculation_progress(request, session_id):
+    """
+    Get real-time progress status for metrics calculation
+    """
+
+    try:
+        progress = MetricsCalculationSession.objects.get(
+            session_id=session_id,
+            user=request.user
+        )
+
+        return JsonResponse({
+            'total_funds': progress.total_funds,
+            'processed_funds': progress.processed_funds,
+            'current_fund_name': progress.current_fund_name or '',
+            'current_stock_name': progress.current_stock_name or '',
+            'status': progress.status,
+            'progress_percentage': progress.progress_percentage,
+            'error_message': progress.error_message or ''
+        })
+
+    except MetricsCalculationSession.DoesNotExist:
+        return JsonResponse({
+            'error': 'Calculation session not found'
+        }, status=404)
+    except Exception as e:
+        print(f"Error in get_calculation_progress: {e}")
+        return JsonResponse({
+            'error': f'Error retrieving progress: {str(e)}'
+        }, status=500)
+
+@login_required
+@require_http_methods(["POST"])
+def cancel_metrics_calculation(request, session_id):
+    """
+    Cancel a running metrics calculation
+    """
+
+    try:
+        progress = MetricsCalculationSession.objects.get(
+            session_id=session_id,
+            user=request.user
+        )
+
+        if progress.status in ['started', 'processing']:
+            progress.status = 'cancelled'
+            progress.error_message = 'Calculation cancelled by user'
+            progress.completed_at = timezone.now()
+            progress.save()
+
+            return JsonResponse({
+                'success': True,
+                'message': 'Calculation cancelled successfully'
+            })
+        else:
+            return JsonResponse({
+                'success': False,
+                'message': f'Cannot cancel calculation with status: {progress.status}'
+            })
+
+    except MetricsCalculationSession.DoesNotExist:
+        return JsonResponse({
+            'success': False,
+            'message': 'Calculation session not found'
+        }, status=404)
+    except Exception as e:
+        print(f"Error in cancel_metrics_calculation: {e}")
+        return JsonResponse({
+            'success': False,
+            'message': f'Error cancelling calculation: {str(e)}'
+        }, status=500)
 
 
