@@ -31,60 +31,6 @@ class PortfolioMetricsCalculator:
         self.user = user
         self.progress_session = None
 
-    def is_equity_security(self, stock_name):
-        """
-        Determine if a security is an equity stock based on name patterns.
-        Returns True for equity stocks, False for bonds, treasury bills, fund entries, etc.
-        """
-        if not stock_name:
-            return False
-
-        stock_name_lower = stock_name.lower()
-
-        # Non-equity patterns to exclude
-        non_equity_patterns = [
-            # Treasury Bills and Government Securities
-            'treasury bill',
-            '% goi',
-            'goi -',
-            'government of india',
-
-            # Corporate Bonds (pattern: company name + SR/STRPP + percentage + date)
-            'sr-',
-            'strpp',
-
-            # Fund Accounting and Administrative Entries
-            'net current asset',
-            'corporate debt market development fund',
-            'tri-party repo',
-            'treps',
-
-            # Fund-to-Fund Investments
-            'fund(g)-direct plan',
-            'fund (g)-direct plan',
-
-            # Special Securities
-            'rights entitlements',
-            'partly paid',
-            '(rights entitlements',
-            '(partly paid up equity shares',
-        ]
-
-        # Check for non-equity patterns
-        for pattern in non_equity_patterns:
-            if pattern in stock_name_lower:
-                return False
-
-        # Additional pattern: Contains percentage with date (bonds)
-        # Pattern: "Company Name XX.XX% (DD-MMM-YYYY)"
-        import re
-        bond_pattern = r'\d+\.\d+%\s*\([^)]+\d{4}\)'
-        if re.search(bond_pattern, stock_name):
-            return False
-
-        # If none of the non-equity patterns match, assume it's equity
-        return True
-
     def calculate_metrics_for_all_funds(self, limit_periods=None):
         """
         Calculate all 22 metrics for all funds with real-time progress tracking
@@ -223,22 +169,17 @@ class PortfolioMetricsCalculator:
         for holding in holdings:
             stock = holding.stock
 
-            # SMART FILTERING: Skip non-equity securities (bonds, treasury bills, fund entries, etc.)
-            if not self.is_equity_security(stock.company_name):
-                logger.debug(f"Skipping non-equity security: {stock.company_name}")
-                continue
-
             # Update progress with current stock
             if self.progress_session:
                 self.update_progress(current_stock_name=stock.company_name)
 
-            logger.debug(f"Processing equity stock: {stock.company_name}")
+            logger.debug(f"Processing stock: {stock.company_name}")
 
             # OPTIMIZATION: Get only the latest period for portfolio calculation speed
             periods = self.get_latest_period_optimized(stock, stock_data_cache[stock.stock_id], limit_periods)
 
             if not periods:
-                logger.warning(f"No financial periods found for equity stock {stock.company_name} - insufficient data for metrics calculation")
+                logger.warning(f"No periods found for stock {stock.company_name}")
                 continue
 
             # OPTIMIZATION: Only calculate latest period metrics for portfolio aggregation
@@ -445,8 +386,8 @@ class PortfolioMetricsCalculator:
             return 0.0
 
         latest = ttm_data[0]
-        if latest.ttm_revenue and latest.ttm_revenue != 0 and latest.ttm_pat:
-            return (latest.ttm_pat / latest.ttm_revenue) * 100
+        if latest.get('ttm_revenue') and latest['ttm_revenue'] != 0 and latest.get('ttm_pat'):
+            return (latest['ttm_pat'] / latest['ttm_revenue']) * 100
         return 0.0
 
     def calculate_qoq_growth_cached(self, quarterly_data):
@@ -457,10 +398,10 @@ class PortfolioMetricsCalculator:
         current = quarterly_data[0]
         previous = quarterly_data[1]
 
-        if (current.quarterly_pat and previous.quarterly_pat and
-            previous.quarterly_pat != 0):
-            return ((current.quarterly_pat - previous.quarterly_pat) /
-                   previous.quarterly_pat) * 100
+        if (current.get('quarterly_pat') and previous.get('quarterly_pat') and
+            previous['quarterly_pat'] != 0):
+            return ((current['quarterly_pat'] - previous['quarterly_pat']) /
+                   previous['quarterly_pat']) * 100
         return 0.0
 
     def calculate_yoy_growth_cached(self, quarterly_data):
@@ -471,10 +412,10 @@ class PortfolioMetricsCalculator:
         current = quarterly_data[0]
         year_ago = quarterly_data[3]  # 4 quarters ago
 
-        if (current.quarterly_pat and year_ago.quarterly_pat and
-            year_ago.quarterly_pat != 0):
-            return ((current.quarterly_pat - year_ago.quarterly_pat) /
-                   year_ago.quarterly_pat) * 100
+        if (current.get('quarterly_pat') and year_ago.get('quarterly_pat') and
+            year_ago['quarterly_pat'] != 0):
+            return ((current['quarterly_pat'] - year_ago['quarterly_pat']) /
+                   year_ago['quarterly_pat']) * 100
         return 0.0
 
     def calculate_revenue_6yr_cagr_cached(self, ttm_data):
@@ -485,16 +426,10 @@ class PortfolioMetricsCalculator:
         latest = ttm_data[0]
         six_years_ago = ttm_data[23]
 
-        # Both values must be positive for CAGR calculation
-        if (latest.ttm_revenue and six_years_ago.ttm_revenue and
-            six_years_ago.ttm_revenue > 0 and latest.ttm_revenue > 0):
-            try:
-                ratio = latest.ttm_revenue / six_years_ago.ttm_revenue
-                if ratio > 0:  # Ensure positive ratio
-                    cagr = (ratio ** (1/6)) - 1
-                    return cagr * 100
-            except (ValueError, OverflowError, ZeroDivisionError):
-                pass
+        if (latest.get('ttm_revenue') and six_years_ago.get('ttm_revenue') and
+            six_years_ago['ttm_revenue'] > 0):
+            cagr = ((latest['ttm_revenue'] / six_years_ago['ttm_revenue']) ** (1/6)) - 1
+            return cagr * 100
         return 0.0
 
     def calculate_pat_6yr_cagr_cached(self, ttm_data):
@@ -505,16 +440,10 @@ class PortfolioMetricsCalculator:
         latest = ttm_data[0]
         six_years_ago = ttm_data[23]
 
-        # Both values must be positive for CAGR calculation
-        if (latest.ttm_pat and six_years_ago.ttm_pat and
-            six_years_ago.ttm_pat > 0 and latest.ttm_pat > 0):
-            try:
-                ratio = latest.ttm_pat / six_years_ago.ttm_pat
-                if ratio > 0:  # Ensure positive ratio
-                    cagr = (ratio ** (1/6)) - 1
-                    return cagr * 100
-            except (ValueError, OverflowError, ZeroDivisionError):
-                pass
+        if (latest.get('ttm_pat') and six_years_ago.get('ttm_pat') and
+            six_years_ago['ttm_pat'] > 0):
+            cagr = ((latest['ttm_pat'] / six_years_ago['ttm_pat']) ** (1/6)) - 1
+            return cagr * 100
         return 0.0
 
     def calculate_current_pe_cached(self, market_cap_data, ttm_data):
@@ -525,9 +454,9 @@ class PortfolioMetricsCalculator:
         latest_mc = market_cap_data[0]
         latest_ttm = ttm_data[0]
 
-        if (latest_mc.market_cap and latest_ttm.ttm_pat and
-            latest_ttm.ttm_pat != 0):
-            return latest_mc.market_cap / latest_ttm.ttm_pat
+        if (latest_mc.get('market_cap') and latest_ttm.get('ttm_pat') and
+            latest_ttm['ttm_pat'] != 0):
+            return latest_mc['market_cap'] / latest_ttm['ttm_pat']
         return 0.0
 
     def calculate_pe_2yr_avg_cached(self, market_cap_data, ttm_data):
@@ -536,8 +465,8 @@ class PortfolioMetricsCalculator:
         for i in range(min(8, len(market_cap_data), len(ttm_data))):  # 8 quarters = 2 years
             mc = market_cap_data[i]
             ttm = ttm_data[i]
-            if (mc.market_cap and ttm.ttm_pat and ttm.ttm_pat != 0):
-                pe_ratios.append(mc.market_cap / ttm.ttm_pat)
+            if (mc.get('market_cap') and ttm.get('ttm_pat') and ttm['ttm_pat'] != 0):
+                pe_ratios.append(mc['market_cap'] / ttm['ttm_pat'])
 
         return sum(pe_ratios) / len(pe_ratios) if pe_ratios else 0.0
 
@@ -547,8 +476,8 @@ class PortfolioMetricsCalculator:
         for i in range(min(20, len(market_cap_data), len(ttm_data))):  # 20 quarters = 5 years
             mc = market_cap_data[i]
             ttm = ttm_data[i]
-            if (mc.market_cap and ttm.ttm_pat and ttm.ttm_pat != 0):
-                pe_ratios.append(mc.market_cap / ttm.ttm_pat)
+            if (mc.get('market_cap') and ttm.get('ttm_pat') and ttm['ttm_pat'] != 0):
+                pe_ratios.append(mc['market_cap'] / ttm['ttm_pat'])
 
         return sum(pe_ratios) / len(pe_ratios) if pe_ratios else 0.0
 
@@ -572,9 +501,9 @@ class PortfolioMetricsCalculator:
         latest_mc = market_cap_data[0]
         latest_ttm = ttm_data[0]
 
-        if (latest_mc.market_cap and latest_ttm.ttm_revenue and
-            latest_ttm.ttm_revenue != 0):
-            return latest_mc.market_cap / latest_ttm.ttm_revenue
+        if (latest_mc.get('market_cap') and latest_ttm.get('ttm_revenue') and
+            latest_ttm['ttm_revenue'] != 0):
+            return latest_mc['market_cap'] / latest_ttm['ttm_revenue']
         return 0.0
 
     def calculate_pr_2yr_avg_cached(self, market_cap_data, ttm_data):
@@ -583,8 +512,8 @@ class PortfolioMetricsCalculator:
         for i in range(min(8, len(market_cap_data), len(ttm_data))):
             mc = market_cap_data[i]
             ttm = ttm_data[i]
-            if (mc.market_cap and ttm.ttm_revenue and ttm.ttm_revenue != 0):
-                pr_ratios.append(mc.market_cap / ttm.ttm_revenue)
+            if (mc.get('market_cap') and ttm.get('ttm_revenue') and ttm['ttm_revenue'] != 0):
+                pr_ratios.append(mc['market_cap'] / ttm['ttm_revenue'])
 
         return sum(pr_ratios) / len(pr_ratios) if pr_ratios else 0.0
 
@@ -594,8 +523,8 @@ class PortfolioMetricsCalculator:
         for i in range(min(20, len(market_cap_data), len(ttm_data))):
             mc = market_cap_data[i]
             ttm = ttm_data[i]
-            if (mc.market_cap and ttm.ttm_revenue and ttm.ttm_revenue != 0):
-                pr_ratios.append(mc.market_cap / ttm.ttm_revenue)
+            if (mc.get('market_cap') and ttm.get('ttm_revenue') and ttm['ttm_revenue'] != 0):
+                pr_ratios.append(mc['market_cap'] / ttm['ttm_revenue'])
 
         return sum(pr_ratios) / len(pr_ratios) if pr_ratios else 0.0
 
@@ -617,8 +546,8 @@ class PortfolioMetricsCalculator:
         for i in range(min(10, len(market_cap_data), len(quarterly_data))):
             mc = market_cap_data[i]
             q = quarterly_data[i]
-            if (mc.market_cap and q.quarterly_revenue and q.quarterly_revenue != 0):
-                pr_ratios.append(mc.market_cap / q.quarterly_revenue)
+            if (mc.get('market_cap') and q.get('quarterly_revenue') and q['quarterly_revenue'] != 0):
+                pr_ratios.append(mc['market_cap'] / q['quarterly_revenue'])
 
         return min(pr_ratios) if pr_ratios else 0.0
 
@@ -628,8 +557,8 @@ class PortfolioMetricsCalculator:
         for i in range(min(10, len(market_cap_data), len(quarterly_data))):
             mc = market_cap_data[i]
             q = quarterly_data[i]
-            if (mc.market_cap and q.quarterly_revenue and q.quarterly_revenue != 0):
-                pr_ratios.append(mc.market_cap / q.quarterly_revenue)
+            if (mc.get('market_cap') and q.get('quarterly_revenue') and q['quarterly_revenue'] != 0):
+                pr_ratios.append(mc['market_cap'] / q['quarterly_revenue'])
 
         return max(pr_ratios) if pr_ratios else 0.0
 
@@ -661,15 +590,15 @@ class PortfolioMetricsCalculator:
         revenue_growth = 0.0
         pat_growth = 0.0
 
-        if (current.ttm_revenue and previous.ttm_revenue and
-            previous.ttm_revenue != 0):
-            revenue_growth = ((current.ttm_revenue - previous.ttm_revenue) /
-                            previous.ttm_revenue)
+        if (current.get('ttm_revenue') and previous.get('ttm_revenue') and
+            previous['ttm_revenue'] != 0):
+            revenue_growth = ((current['ttm_revenue'] - previous['ttm_revenue']) /
+                            previous['ttm_revenue'])
 
-        if (current.ttm_pat and previous.ttm_pat and
-            previous.ttm_pat != 0):
-            pat_growth = ((current.ttm_pat - previous.ttm_pat) /
-                        previous.ttm_pat)
+        if (current.get('ttm_pat') and previous.get('ttm_pat') and
+            previous['ttm_pat'] != 0):
+            pat_growth = ((current['ttm_pat'] - previous['ttm_pat']) /
+                        previous['ttm_pat'])
 
         return ((revenue_growth + pat_growth) / 2) * 100
 
