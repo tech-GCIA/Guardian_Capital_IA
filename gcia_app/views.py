@@ -10,7 +10,7 @@ from django.contrib import messages
 import openpyxl
 from django.http import HttpResponse
 from gcia_app.forms import ExcelUploadForm, MasterDataExcelUploadForm
-from gcia_app.models import AMCFundScheme, AMCFundSchemeNavLog, Stock, StockMarketCap, StockTTMData, StockQuarterlyData, StockAnnualRatios, StockPrice, FundHolding
+from gcia_app.models import AMCFundScheme, AMCFundSchemeNavLog, Stock, StockMarketCap, StockTTMData, StockQuarterlyData, StockAnnualRatios, StockPrice, FundHolding, FundMetricsLog, FileStructureMetadata
 import pandas as pd
 import os
 import datetime
@@ -23,6 +23,82 @@ import re
 from difflib import SequenceMatcher
 from django.db import transaction
 from gcia_app.index_scrapper_from_screener import get_bse500_pe_ratio
+from gcia_app.dynamic_stock_analyzer import DynamicStockSheetAnalyzer
+
+def clean_all_stock_data():
+    """
+    Clean all existing stock-related data from the database.
+    This includes all Stock records and their related time-series data,
+    as well as Fund Holdings and Metrics that reference stocks.
+
+    Returns:
+        dict: Statistics about the cleanup operation
+    """
+    stats = {
+        'stocks_deleted': 0,
+        'market_cap_records_deleted': 0,
+        'ttm_records_deleted': 0,
+        'quarterly_records_deleted': 0,
+        'annual_ratios_deleted': 0,
+        'price_records_deleted': 0,
+        'fund_holdings_deleted': 0,
+        'fund_metrics_deleted': 0,
+    }
+
+    try:
+        with transaction.atomic():
+            # Delete Fund Metrics Log records first (they reference stocks)
+            fund_metrics_count = FundMetricsLog.objects.count()
+            FundMetricsLog.objects.all().delete()
+            stats['fund_metrics_deleted'] = fund_metrics_count
+
+            # Delete Fund Holdings (they reference stocks)
+            fund_holdings_count = FundHolding.objects.count()
+            FundHolding.objects.all().delete()
+            stats['fund_holdings_deleted'] = fund_holdings_count
+
+            # Delete all stock time-series data
+            market_cap_count = StockMarketCap.objects.count()
+            StockMarketCap.objects.all().delete()
+            stats['market_cap_records_deleted'] = market_cap_count
+
+            ttm_count = StockTTMData.objects.count()
+            StockTTMData.objects.all().delete()
+            stats['ttm_records_deleted'] = ttm_count
+
+            quarterly_count = StockQuarterlyData.objects.count()
+            StockQuarterlyData.objects.all().delete()
+            stats['quarterly_records_deleted'] = quarterly_count
+
+            annual_ratios_count = StockAnnualRatios.objects.count()
+            StockAnnualRatios.objects.all().delete()
+            stats['annual_ratios_deleted'] = annual_ratios_count
+
+            price_count = StockPrice.objects.count()
+            StockPrice.objects.all().delete()
+            stats['price_records_deleted'] = price_count
+
+            # Finally delete all Stock records
+            stocks_count = Stock.objects.count()
+            Stock.objects.all().delete()
+            stats['stocks_deleted'] = stocks_count
+
+            print(f"Successfully cleaned all stock data:")
+            print(f"   - Stocks: {stats['stocks_deleted']}")
+            print(f"   - Market Cap records: {stats['market_cap_records_deleted']}")
+            print(f"   - TTM records: {stats['ttm_records_deleted']}")
+            print(f"   - Quarterly records: {stats['quarterly_records_deleted']}")
+            print(f"   - Annual ratios: {stats['annual_ratios_deleted']}")
+            print(f"   - Price records: {stats['price_records_deleted']}")
+            print(f"   - Fund holdings: {stats['fund_holdings_deleted']}")
+            print(f"   - Fund metrics: {stats['fund_metrics_deleted']}")
+
+    except Exception as e:
+        print(f"Error during stock data cleanup: {str(e)}")
+        print(traceback.format_exc())
+        raise
+
+    return stats
 
 def signup_view(request):
     if request.method == 'POST':
@@ -949,107 +1025,184 @@ def find_or_create_stock(row, column_mapping, stats):
         stats['stocks_failed'] += 1
         return None
 
+def validate_import_completeness(analysis_results, stats, filename):
+    """
+    Validates that the import process captured all detected periods without data loss.
+    Creates FileStructureMetadata record and validates imported data against detected structure.
+
+    Args:
+        analysis_results: Results from DynamicStockSheetAnalyzer
+        stats: Import statistics
+        filename: Original filename
+
+    Returns:
+        dict: Validation results with errors, warnings, and metadata
+    """
+    import uuid
+    from collections import defaultdict
+
+    validation_results = {
+        'has_errors': False,
+        'has_warnings': False,
+        'errors': [],
+        'warnings': [],
+        'metadata_id': None,
+        'detected_vs_imported': {}
+    }
+
+    try:
+        # Generate unique session ID for this upload
+        upload_session_id = f"upload_{uuid.uuid4().hex[:12]}_{int(timezone.now().timestamp())}"
+
+        # Create FileStructureMetadata record
+        metadata = FileStructureMetadata.objects.create(
+            upload_session_id=upload_session_id,
+            original_filename=filename,
+            total_columns=analysis_results['total_columns'],
+            market_cap_column_mapping=analysis_results['column_mapping']['time_series_ranges'].get('market_cap', {}),
+            ttm_column_mapping=analysis_results['column_mapping']['time_series_ranges'].get('ttm', {}),
+            quarterly_column_mapping=analysis_results['column_mapping']['time_series_ranges'].get('quarterly', {}),
+            annual_column_mapping=analysis_results['column_mapping']['time_series_ranges'].get('annual', {}),
+            price_column_mapping=analysis_results['column_mapping']['time_series_ranges'].get('price', {}),
+            detected_periods=analysis_results['column_mapping']['periods'],
+            basic_columns_end=12,
+            import_status='completed',
+            records_imported=stats['total_stocks']
+        )
+        validation_results['metadata_id'] = metadata.file_structure_id
+
+        # Get actual imported periods from database
+        actual_periods = {
+            'market_cap': list(StockMarketCap.objects.values_list('date', flat=True).distinct()),
+            'ttm': list(StockTTMData.objects.values_list('period', flat=True).distinct()),
+            'quarterly': list(StockQuarterlyData.objects.values_list('period', flat=True).distinct()),
+            'annual': list(StockAnnualRatios.objects.values_list('financial_year', flat=True).distinct()),
+            'price': list(StockPrice.objects.values_list('price_date', flat=True).distinct())
+        }
+
+        # Convert dates to strings for comparison
+        actual_periods['market_cap'] = [d.strftime('%Y-%m-%d') for d in actual_periods['market_cap']]
+        actual_periods['price'] = [d.strftime('%Y-%m-%d') for d in actual_periods['price']]
+
+        # Compare detected vs imported periods
+        detected_periods = analysis_results['column_mapping']['periods']
+
+        for category in ['market_cap', 'ttm', 'quarterly', 'annual', 'price']:
+            detected = set(detected_periods.get(category, []))
+            imported = set(actual_periods.get(category, []))
+
+            validation_results['detected_vs_imported'][category] = {
+                'detected_count': len(detected),
+                'imported_count': len(imported),
+                'detected_periods': sorted(list(detected)),
+                'imported_periods': sorted(list(imported)),
+                'missing_periods': sorted(list(detected - imported)),
+                'extra_periods': sorted(list(imported - detected))
+            }
+
+            # Check for missing periods (data loss)
+            missing = detected - imported
+            if missing:
+                validation_results['has_errors'] = True
+                validation_results['errors'].append(
+                    f"{category.upper()}: {len(missing)} periods detected but not imported: {sorted(list(missing))}"
+                )
+
+            # Check for extra periods (unexpected data)
+            extra = imported - detected
+            if extra:
+                validation_results['has_warnings'] = True
+                validation_results['warnings'].append(
+                    f"{category.upper()}: {len(extra)} extra periods imported not detected in file: {sorted(list(extra))}"
+                )
+
+        # Validate record counts
+        expected_max_records = stats['total_stocks']
+        for category, count in [
+            ('market_cap', stats['market_cap_records']),
+            ('ttm', stats['ttm_records']),
+            ('quarterly', stats['quarterly_records']),
+            ('annual', stats['annual_ratios_records']),
+            ('price', stats['price_records'])
+        ]:
+            detected_periods_count = len(detected_periods.get(category, []))
+            expected_records = expected_max_records * detected_periods_count
+
+            if count < (expected_records * 0.8):  # Allow 20% tolerance for missing data
+                validation_results['has_warnings'] = True
+                validation_results['warnings'].append(
+                    f"{category.upper()}: Low record count - expected ~{expected_records}, got {count}"
+                )
+
+        # Update metadata with validation results
+        metadata.validation_errors = {
+            'errors': validation_results['errors'],
+            'warnings': validation_results['warnings'],
+            'detected_vs_imported': validation_results['detected_vs_imported']
+        }
+
+        if validation_results['has_errors']:
+            metadata.import_status = 'completed_with_errors'
+        elif validation_results['has_warnings']:
+            metadata.import_status = 'completed_with_warnings'
+        else:
+            metadata.import_status = 'completed_successfully'
+
+        metadata.save()
+
+    except Exception as e:
+        validation_results['has_errors'] = True
+        validation_results['errors'].append(f"Validation process failed: {str(e)}")
+
+    return validation_results
+
 def process_stocks_base_sheet(excel_file):
     """
-    Process the Stocks Base Sheet Excel file based on the multi-level header structure
+    DYNAMIC Process the Stocks Base Sheet Excel file with intelligent structure detection.
+    Handles files with any number of periods (3 quarters to 30+ quarters) automatically.
+    Uses DynamicStockSheetAnalyzer for flexible column mapping and period detection.
     """
     try:
-        # First, validate the Excel structure
-        diagnostics = validate_excel_structure(excel_file)
-        print(f"Excel Structure Diagnostics: {diagnostics}")
-        
-        # Read the Excel file - skip first 8 rows to get to actual data (row 9 onwards)
+        print("=== DYNAMIC STOCK SHEET PROCESSING ===")
+
+        # Initialize the dynamic analyzer
+        analyzer = DynamicStockSheetAnalyzer()
+
+        # Analyze the Excel file structure dynamically
+        print("Step 1: Analyzing Excel structure...")
+        analysis_results = analyzer.analyze_excel_structure(excel_file)
+
+        if not analysis_results['validation']['is_valid']:
+            error_msg = f"Invalid Excel structure: {', '.join(analysis_results['validation']['errors'])}"
+            raise ValueError(error_msg)
+
+        # Log analysis results
+        print(f"Step 2: Structure analysis completed:")
+        print(f"   - Total columns detected: {analysis_results['total_columns']}")
+        print(f"   - Basic columns found: {len(analysis_results['basic_columns'])}")
+        print(f"   - Data categories detected: {len(analysis_results['category_regions'])}")
+        print(f"   - Total periods detected: {analysis_results['validation']['summary']['total_periods_detected']}")
+
+        for category, time_range in analysis_results['column_mapping']['time_series_ranges'].items():
+            print(f"   - {category}: {time_range['period_count']} periods")
+
+        # Show warnings if any
+        if analysis_results['validation']['warnings']:
+            print("Warnings:")
+            for warning in analysis_results['validation']['warnings']:
+                print(f"   - {warning}")
+
+        # Read the data portion (skip headers)
+        print("Step 3: Reading data rows...")
         df = pd.read_excel(excel_file, skiprows=8)
-        
-        # Get column headers (these should be from row 8 of the original file)
-        headers = df.columns.tolist()
-        print(f"Total columns after skiprows=8: {len(headers)}")
-        print(f"First 20 headers: {headers[:20]}")
-        print(f"Sample of first row data: {df.iloc[0][:20].tolist() if len(df) > 0 else 'No data'}")
-        
-        # Define column mapping based on the header structure analysis
-        # Column positions are 0-based after reading with skiprows=8
-        column_mapping = {
-            'basic_info': {
-                's_no': 0,           # S. No.
-                'company_name': 1,   # Company Name
-                'accord_code': 2,    # Accord Code
-                'sector': 3,         # Sector
-                'cap': 4,            # Cap
-                'free_float': 5,     # Free Float
-                'revenue_6yr_cagr': 6, # 6 Year CAGR Revenue
-                'revenue_ttm': 7,    # TTM Revenue
-                'pat_6yr_cagr': 8,   # 6 Year CAGR PAT
-                'pat_ttm': 9,        # TTM PAT
-                'current': 10,       # Current
-                'two_yr_avg': 11,    # 2 Yr Avg
-                'reval_deval': 12,   # Reval/deval
-            }
-        }
-        
-        # Identify time-series column ranges based on CORRECTED header analysis from Row 6
-        # Market Cap dates: columns 14-41 (verified from actual data analysis)
-        market_cap_start_col = 14
-        market_cap_end_col = 41
-        
-        # Market Cap Free Float: columns 43-70 (Row 6 analysis shows FF at col 44+)
-        market_cap_ff_start_col = 43
-        market_cap_ff_end_col = 70
-        
-        # TTM Revenue: columns 72-107 (Row 6 analysis shows TTM Revenue at col 73+)
-        ttm_revenue_start_col = 72
-        ttm_revenue_end_col = 107
-        
-        # TTM Revenue Free Float: columns 108-143 (Row 6 analysis shows TTM Revenue FF at col 109+)
-        ttm_revenue_ff_start_col = 108
-        ttm_revenue_ff_end_col = 143
-        
-        # TTM PAT: columns 144-179 (Row 6 analysis shows TTM PAT at col 145+)
-        ttm_pat_start_col = 144
-        ttm_pat_end_col = 179
-        
-        # TTM PAT Free Float: columns 180-215 (Row 6 analysis shows TTM PAT FF at col 181+)
-        ttm_pat_ff_start_col = 180
-        ttm_pat_ff_end_col = 215
-        
-        # Quarterly Revenue: columns 216-251 (Row 6 analysis shows Quarterly Revenue at col 217+)
-        qtr_revenue_start_col = 216
-        qtr_revenue_end_col = 251
-        
-        # Quarterly Revenue Free Float: columns 252-287 (Row 6 analysis shows at col 253+)
-        qtr_revenue_ff_start_col = 252
-        qtr_revenue_ff_end_col = 287
-        
-        # Quarterly PAT: columns 288-323 (Row 6 analysis shows Quarterly PAT at col 289+)
-        qtr_pat_start_col = 288
-        qtr_pat_end_col = 323
-        
-        # Quarterly PAT Free Float: columns 324-359 (Row 6 analysis shows at col 325+)
-        qtr_pat_ff_start_col = 324
-        qtr_pat_ff_end_col = 359
-        
-        # Annual ratios: ROCE, ROE, Retention (12 years each) - based on Row 6 analysis
-        roce_start_col = 361  # Row 6 shows ROCE at col 361, data starts at 361 (CORRECTED)
-        roce_end_col = 372    # 12 years of data
-        
-        roe_start_col = 374   # Row 6 shows ROE at col 374, data starts at 374 (CORRECTED)
-        roe_end_col = 385     # 12 years of data
-        
-        retention_start_col = 387  # Row 6 shows Retention at col 387, data starts at 387 (CORRECTED)
-        retention_end_col = 398    # 12 years of data
-        
-        # Stock Price data (Row 6 shows Share Price at col 400)
-        price_start_col = 399  # Data starts just before the header
-        price_end_col = 409    # Various price dates
-        
-        pe_start_col = 410     # Row 6 shows PE around col 413
-        pe_end_col = 420       # PE ratios
-        
-        # Identifiers at the end - fixed positions based on analysis
-        bse_code_col = 422  # BSE Code at fixed position
-        nse_code_col = 423  # NSE Symbol at fixed position  
-        isin_col = 424      # ISIN at fixed position
-        
+        print(f"   - Data rows to process: {len(df)}")
+
+        # Get the dynamic column mapping
+        column_mapping = analysis_results['column_mapping']
+        basic_columns = column_mapping['basic_info']
+        periods_mapping = column_mapping['periods']
+        time_series_ranges = column_mapping['time_series_ranges']
+
         # Statistics for tracking
         stats = {
             'total_stocks': 0,
@@ -1060,222 +1213,372 @@ def process_stocks_base_sheet(excel_file):
             'quarterly_records': 0,
             'annual_ratios_records': 0,
             'price_records': 0,
-            'skipped_rows': 0
+            'skipped_rows': 0,
+            'analysis_results': analysis_results
         }
-        
-        # Process each row
-        print(f"Processing {len(df)} rows...")
-        
+
+        # Process each row using dynamic mapping
+        print("Step 4: Processing stock data...")
+
         with transaction.atomic():
             for index, row in df.iterrows():
                 try:
-                    # Skip sample rows or empty rows
-                    if (pd.isna(row.iloc[column_mapping['basic_info']['company_name']]) or 
-                        str(row.iloc[column_mapping['basic_info']['s_no']]).upper() == 'XX' or
-                        pd.isna(row.iloc[column_mapping['basic_info']['accord_code']])):
+                    # Skip empty rows using dynamic column positions
+                    company_name_col = basic_columns.get('company_name')
+                    accord_code_col = basic_columns.get('accord_code')
+
+                    if (company_name_col is None or accord_code_col is None or
+                        pd.isna(row.iloc[company_name_col]) or pd.isna(row.iloc[accord_code_col])):
                         stats['skipped_rows'] += 1
                         continue
-                    
-                    company_name = str(row.iloc[column_mapping['basic_info']['company_name']]).strip()
-                    accord_code = str(row.iloc[column_mapping['basic_info']['accord_code']]).strip()
-                    
+
+                    company_name = str(row.iloc[company_name_col]).strip()
+                    accord_code = str(row.iloc[accord_code_col]).strip()
+
                     if not company_name or not accord_code:
                         stats['skipped_rows'] += 1
                         continue
-                    
+
                     stats['total_stocks'] += 1
-                    
+
+                    # Prepare stock data using dynamic mapping
+                    stock_data = {
+                        'company_name': company_name,
+                        'sector': str(row.iloc[basic_columns.get('sector', 0)]) if basic_columns.get('sector') and not pd.isna(row.iloc[basic_columns.get('sector', 0)]) else '',
+                        'cap': str(row.iloc[basic_columns.get('cap', 0)]) if basic_columns.get('cap') and not pd.isna(row.iloc[basic_columns.get('cap', 0)]) else '',
+                    }
+
+                    # Add optional basic fields if available
+                    optional_fields = {
+                        'free_float': 'free_float',
+                        'revenue_6yr_cagr': 'revenue_6yr_cagr',
+                        'revenue_ttm': 'revenue_ttm',
+                        'pat_6yr_cagr': 'pat_6yr_cagr',
+                        'pat_ttm': 'pat_ttm',
+                        'current_value': 'current',
+                        'two_yr_avg': 'two_yr_avg',
+                        'reval_deval': 'reval_deval'
+                    }
+
+                    for field_name, column_key in optional_fields.items():
+                        col_idx = basic_columns.get(column_key)
+                        if col_idx is not None and col_idx < len(row):
+                            stock_data[field_name] = parse_numeric_value(row.iloc[col_idx])
+
+                    # Add stock identifiers if available
+                    identifier_fields = {
+                        'bse_code': 'bse_code',
+                        'nse_symbol': 'nse_symbol',
+                        'isin': 'isin'
+                    }
+
+                    for field_name, column_key in identifier_fields.items():
+                        col_idx = basic_columns.get(column_key)
+                        if col_idx is not None and col_idx < len(row):
+                            value = str(row.iloc[col_idx]).strip() if not pd.isna(row.iloc[col_idx]) else ''
+                            if value and value != 'nan':
+                                stock_data[field_name] = value
+
                     # Create or update Stock record
                     stock, created = Stock.objects.update_or_create(
                         accord_code=accord_code,
-                        defaults={
-                            'company_name': company_name,
-                            'sector': str(row.iloc[column_mapping['basic_info']['sector']]) if not pd.isna(row.iloc[column_mapping['basic_info']['sector']]) else '',
-                            'cap': str(row.iloc[column_mapping['basic_info']['cap']]) if not pd.isna(row.iloc[column_mapping['basic_info']['cap']]) else '',
-                            'free_float': parse_numeric_value(row.iloc[column_mapping['basic_info']['free_float']]),
-                            'revenue_6yr_cagr': parse_numeric_value(row.iloc[column_mapping['basic_info']['revenue_6yr_cagr']]),
-                            'revenue_ttm': parse_numeric_value(row.iloc[column_mapping['basic_info']['revenue_ttm']]),
-                            'pat_6yr_cagr': parse_numeric_value(row.iloc[column_mapping['basic_info']['pat_6yr_cagr']]),
-                            'pat_ttm': parse_numeric_value(row.iloc[column_mapping['basic_info']['pat_ttm']]),
-                            'current_value': parse_numeric_value(row.iloc[column_mapping['basic_info']['current']]),
-                            'two_yr_avg': parse_numeric_value(row.iloc[column_mapping['basic_info']['two_yr_avg']]),
-                            'reval_deval': parse_numeric_value(row.iloc[column_mapping['basic_info']['reval_deval']]),
-                            'bse_code': str(row.iloc[bse_code_col]) if bse_code_col and not pd.isna(row.iloc[bse_code_col]) else None,
-                            'nse_symbol': str(row.iloc[nse_code_col]) if nse_code_col and not pd.isna(row.iloc[nse_code_col]) else None,
-                            'isin': str(row.iloc[isin_col]) if isin_col and not pd.isna(row.iloc[isin_col]) else None,
-                        }
+                        defaults=stock_data
                     )
-                    
+
                     if created:
                         stats['stocks_created'] += 1
                     else:
                         stats['stocks_updated'] += 1
-                    
-                    # Add detailed logging for first row to confirm processing
-                    if stats['total_stocks'] == 1:
-                        print(f"=== DEBUGGING ROW {stats['total_stocks']} ===")
-                        print(f"Company: {company_name}, Accord: {accord_code}")
-                        print(f"Free Float raw value: {row.iloc[column_mapping['basic_info']['free_float']]}")
-                        print(f"Free Float parsed: {parse_numeric_value(row.iloc[column_mapping['basic_info']['free_float']])}")
-                        print(f"Revenue TTM raw: {row.iloc[column_mapping['basic_info']['revenue_ttm']]}")
-                        print(f"Revenue TTM parsed: {parse_numeric_value(row.iloc[column_mapping['basic_info']['revenue_ttm']])}")
-                        print(f"Market cap sample (col {market_cap_start_col}): {row.iloc[market_cap_start_col] if market_cap_start_col < len(row) else 'N/A'}")
-                        print(f"TTM sample (col {ttm_revenue_start_col}): {row.iloc[ttm_revenue_start_col] if ttm_revenue_start_col < len(row) else 'N/A'}")
-                        print("===========================")
-                    
-                    # Process Market Cap data (specific dates)
-                    market_cap_dates = [
-                        '2025-08-19', '2025-06-30', '2025-03-28', '2025-01-31', '2024-12-31',
-                        '2024-09-30', '2024-06-28', '2024-03-28', '2023-12-28', '2023-09-29',
-                        '2023-06-30', '2023-03-31', '2022-12-30', '2022-09-30', '2022-06-30',
-                        '2022-03-31', '2021-12-31', '2021-09-30', '2021-06-30', '2021-03-31',
-                        '2020-12-31', '2020-09-30', '2020-06-30', '2020-03-31', '2019-12-31',
-                        '2019-09-30', '2019-06-28', '2019-04-01'
-                    ]
-                    
-                    for i, date_str in enumerate(market_cap_dates):
-                        if market_cap_start_col + i < len(row):
-                            market_cap_val = parse_numeric_value(row.iloc[market_cap_start_col + i])
-                            market_cap_ff_val = None
-                            if market_cap_ff_start_col + i < len(row):
-                                market_cap_ff_val = parse_numeric_value(row.iloc[market_cap_ff_start_col + i])
-                            
-                            if market_cap_val is not None or market_cap_ff_val is not None:
-                                try:
-                                    date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
-                                    StockMarketCap.objects.update_or_create(
-                                        stock=stock,
-                                        date=date_obj,
-                                        defaults={
-                                            'market_cap': market_cap_val,
-                                            'market_cap_free_float': market_cap_ff_val,
-                                        }
-                                    )
-                                    stats['market_cap_records'] += 1
-                                except ValueError:
+
+                    # Debug output for first few rows
+                    if stats['total_stocks'] <= 3:
+                        print(f"=== Processing Stock {stats['total_stocks']}: {company_name} ({accord_code}) ===")
+
+                    # Process time-series data dynamically using actual column positions
+                    for category_name, time_range in time_series_ranges.items():
+                        periods = time_range['periods']
+
+                        if not periods:  # Skip categories with no periods
+                            continue
+
+                        # Check if we have actual column positions for this category
+                        if 'period_column_map' in time_range and time_range['period_column_map']:
+                            # Use actual column positions (handles non-consecutive columns)
+                            period_column_map = time_range['period_column_map']
+
+                            for period in periods:
+                                if period not in period_column_map:
                                     continue
-                    
-                    # Process TTM data (periods like 202506, 202503)
-                    ttm_periods = [
-                        '202506', '202503', '202412', '202409', '202406', '202403',
-                        '202312', '202309', '202306', '202303', '202212', '202209',
-                        '202206', '202203', '202112', '202109', '202106', '202103',
-                        '202012', '202009', '202006', '202003', '201912', '201909',
-                        '201906', '201903', '201812', '201809', '201806', '201803',
-                        '201712', '201709', '201706', '201703', '201612'
-                    ]
-                    
-                    for i, period in enumerate(ttm_periods):
-                        if (ttm_revenue_start_col + i < len(row) and 
-                            ttm_revenue_ff_start_col + i < len(row) and
-                            ttm_pat_start_col + i < len(row) and 
-                            ttm_pat_ff_start_col + i < len(row)):
-                            
-                            ttm_rev = parse_numeric_value(row.iloc[ttm_revenue_start_col + i])
-                            ttm_rev_ff = parse_numeric_value(row.iloc[ttm_revenue_ff_start_col + i])
-                            ttm_pat = parse_numeric_value(row.iloc[ttm_pat_start_col + i])
-                            ttm_pat_ff = parse_numeric_value(row.iloc[ttm_pat_ff_start_col + i])
-                            
-                            if any(val is not None for val in [ttm_rev, ttm_rev_ff, ttm_pat, ttm_pat_ff]):
-                                StockTTMData.objects.update_or_create(
-                                    stock=stock,
-                                    period=period,
-                                    defaults={
-                                        'ttm_revenue': ttm_rev,
-                                        'ttm_revenue_free_float': ttm_rev_ff,
-                                        'ttm_pat': ttm_pat,
-                                        'ttm_pat_free_float': ttm_pat_ff,
-                                    }
-                                )
-                                stats['ttm_records'] += 1
-                    
-                    # Process Quarterly data (same periods as TTM)
-                    for i, period in enumerate(ttm_periods):
-                        if (qtr_revenue_start_col + i < len(row) and 
-                            qtr_revenue_ff_start_col + i < len(row) and
-                            qtr_pat_start_col + i < len(row) and 
-                            qtr_pat_ff_start_col + i < len(row)):
-                            
-                            qtr_rev = parse_numeric_value(row.iloc[qtr_revenue_start_col + i])
-                            qtr_rev_ff = parse_numeric_value(row.iloc[qtr_revenue_ff_start_col + i])
-                            qtr_pat = parse_numeric_value(row.iloc[qtr_pat_start_col + i])
-                            qtr_pat_ff = parse_numeric_value(row.iloc[qtr_pat_ff_start_col + i])
-                            
-                            if any(val is not None for val in [qtr_rev, qtr_rev_ff, qtr_pat, qtr_pat_ff]):
-                                StockQuarterlyData.objects.update_or_create(
-                                    stock=stock,
-                                    period=period,
-                                    defaults={
-                                        'quarterly_revenue': qtr_rev,
-                                        'quarterly_revenue_free_float': qtr_rev_ff,
-                                        'quarterly_pat': qtr_pat,
-                                        'quarterly_pat_free_float': qtr_pat_ff,
-                                    }
-                                )
-                                stats['quarterly_records'] += 1
-                    
-                    # Process Annual Ratios (financial years like 2024-25, 2023-24)
-                    annual_years = [
-                        '2024-25', '2023-24', '2022-23', '2021-22', '2020-21', '2019-20',
-                        '2018-19', '2017-18', '2016-17', '2015-16', '2014-15', '2013-14'
-                    ]
-                    
-                    for i, year in enumerate(annual_years):
-                        if (roce_start_col + i < len(row) and 
-                            roe_start_col + i < len(row) and
-                            retention_start_col + i < len(row)):
-                            
-                            roce = parse_numeric_value(row.iloc[roce_start_col + i])
-                            roe = parse_numeric_value(row.iloc[roe_start_col + i])
-                            retention = parse_numeric_value(row.iloc[retention_start_col + i])
-                            
-                            if any(val is not None for val in [roce, roe, retention]):
-                                StockAnnualRatios.objects.update_or_create(
-                                    stock=stock,
-                                    financial_year=year,
-                                    defaults={
-                                        'roce_percentage': roce,
-                                        'roe_percentage': roe,
-                                        'retention_percentage': retention,
-                                    }
-                                )
-                                stats['annual_ratios_records'] += 1
-                    
-                    # Process Stock Price data
-                    price_dates = [
-                        '2025-08-19', '2025-06-30', '2025-03-28', '2024-12-31', '2024-09-30',
-                        '2024-06-28', '2024-03-28', '2023-12-28', '2023-09-29', '2023-06-30'
-                    ]
-                    
-                    for i, date_str in enumerate(price_dates):
-                        if (price_start_col + i < len(row) and pe_start_col + i < len(row)):
-                            price = parse_numeric_value(row.iloc[price_start_col + i])
-                            pe = parse_numeric_value(row.iloc[pe_start_col + i])
-                            
-                            if price is not None or pe is not None:
-                                try:
-                                    date_obj = datetime.datetime.strptime(date_str, '%Y-%m-%d').date()
-                                    StockPrice.objects.update_or_create(
-                                        stock=stock,
-                                        price_date=date_obj,
-                                        defaults={
-                                            'share_price': price,
-                                            'pe_ratio': pe,
-                                        }
-                                    )
-                                    stats['price_records'] += 1
-                                except ValueError:
+
+                                col_idx = period_column_map[period]
+
+                                if col_idx >= len(row):
                                     continue
-                    
+
+                                value = parse_numeric_value(row.iloc[col_idx])
+                                if value is None:
+                                    continue
+
+                                # Store data based on category type (using actual column positions)
+                                if category_name.startswith('market_cap'):
+                                    # Parse period as date for market cap
+                                    try:
+                                        if '-' in period:  # Date format (handle both YYYY-MM-DD and datetime strings)
+                                            # Handle datetime strings like '2025-08-19 00:00:00'
+                                            period_clean = period.split(' ')[0]  # Remove time component if present
+                                            date_obj = datetime.datetime.strptime(period_clean, '%Y-%m-%d').date()
+                                        else:  # YYYYMM format - convert to end of month
+                                            year = int(period[:4])
+                                            month = int(period[4:6])
+                                            date_obj = datetime.date(year, month, 28)  # Use 28th as safe end-of-month
+
+                                        is_free_float = 'free_float' in category_name
+
+                                        market_cap_data = {'market_cap': value} if not is_free_float else {'market_cap_free_float': value}
+
+                                        StockMarketCap.objects.update_or_create(
+                                            stock=stock,
+                                            date=date_obj,
+                                            defaults=market_cap_data
+                                        )
+                                        stats['market_cap_records'] += 1
+
+                                    except ValueError:
+                                        continue
+
+                                elif category_name.startswith('ttm_'):
+                                    # TTM data uses period format (YYYYMM)
+                                    is_free_float = 'free_float' in category_name
+                                    is_pat = 'pat' in category_name
+
+                                    if is_pat:
+                                        ttm_data = {'ttm_pat': value} if not is_free_float else {'ttm_pat_free_float': value}
+                                    else:  # revenue
+                                        ttm_data = {'ttm_revenue': value} if not is_free_float else {'ttm_revenue_free_float': value}
+
+                                    StockTTMData.objects.update_or_create(
+                                        stock=stock,
+                                        period=period,
+                                        defaults=ttm_data
+                                    )
+                                    stats['ttm_records'] += 1
+
+                                elif category_name.startswith('quarterly_'):
+                                    # Quarterly data uses period format (YYYYMM)
+                                    is_free_float = 'free_float' in category_name
+                                    is_pat = 'pat' in category_name
+
+                                    if is_pat:
+                                        qtr_data = {'quarterly_pat': value} if not is_free_float else {'quarterly_pat_free_float': value}
+                                    else:  # revenue
+                                        qtr_data = {'quarterly_revenue': value} if not is_free_float else {'quarterly_revenue_free_float': value}
+
+                                    StockQuarterlyData.objects.update_or_create(
+                                        stock=stock,
+                                        period=period,
+                                        defaults=qtr_data
+                                    )
+                                    stats['quarterly_records'] += 1
+
+                                elif category_name.startswith('annual_'):
+                                    # Annual ratios use financial year format
+                                    ratio_type = category_name.replace('annual_', '')
+
+                                    ratio_data = {f'{ratio_type}_percentage': value}
+
+                                    StockAnnualRatios.objects.update_or_create(
+                                        stock=stock,
+                                        financial_year=period,
+                                        defaults=ratio_data
+                                    )
+                                    stats['annual_ratios_records'] += 1
+
+                                elif category_name in ['share_price', 'pr_ratio', 'pe_ratio']:
+                                    # Price data uses date format
+                                    try:
+                                        if '-' in period:  # Date format (handle both YYYY-MM-DD and datetime strings)
+                                            # Handle datetime strings like '2025-08-19 00:00:00'
+                                            period_clean = period.split(' ')[0]  # Remove time component if present
+                                            date_obj = datetime.datetime.strptime(period_clean, '%Y-%m-%d').date()
+                                        else:  # YYYYMM format
+                                            year = int(period[:4])
+                                            month = int(period[4:6])
+                                            date_obj = datetime.date(year, month, 28)
+
+                                        # Determine which field to update based on category
+                                        if category_name == 'share_price':
+                                            price_data = {'share_price': value}
+                                        elif category_name == 'pr_ratio':
+                                            price_data = {'pr_ratio': value}
+                                        else:  # pe_ratio
+                                            price_data = {'pe_ratio': value}
+
+                                        StockPrice.objects.update_or_create(
+                                            stock=stock,
+                                            price_date=date_obj,
+                                            defaults=price_data
+                                        )
+                                        stats['price_records'] += 1
+
+                                    except ValueError:
+                                        continue
+
+                        else:
+                            # Fallback to consecutive logic for categories without explicit column mapping
+                            start_col = time_range['start_col']
+
+                            for period_idx, period in enumerate(periods):
+                                col_idx = start_col + period_idx
+
+                                if col_idx >= len(row):
+                                    continue
+
+                                value = parse_numeric_value(row.iloc[col_idx])
+                                if value is None:
+                                    continue
+
+                                # Store data based on category type (consecutive fallback)
+                                if category_name.startswith('market_cap'):
+                                    # Parse period as date for market cap
+                                    try:
+                                        if '-' in period:  # Date format (handle both YYYY-MM-DD and datetime strings)
+                                            # Handle datetime strings like '2025-08-19 00:00:00'
+                                            period_clean = period.split(' ')[0]  # Remove time component if present
+                                            date_obj = datetime.datetime.strptime(period_clean, '%Y-%m-%d').date()
+                                        else:  # YYYYMM format - convert to end of month
+                                            year = int(period[:4])
+                                            month = int(period[4:6])
+                                            date_obj = datetime.date(year, month, 28)  # Use 28th as safe end-of-month
+
+                                        is_free_float = 'free_float' in category_name
+
+                                        market_cap_data = {'market_cap': value} if not is_free_float else {'market_cap_free_float': value}
+
+                                        StockMarketCap.objects.update_or_create(
+                                            stock=stock,
+                                            date=date_obj,
+                                            defaults=market_cap_data
+                                        )
+                                        stats['market_cap_records'] += 1
+
+                                    except ValueError:
+                                        continue
+
+                                elif category_name.startswith('ttm_'):
+                                    # TTM data uses period format (YYYYMM)
+                                    is_free_float = 'free_float' in category_name
+                                    is_pat = 'pat' in category_name
+
+                                    if is_pat:
+                                        ttm_data = {'ttm_pat': value} if not is_free_float else {'ttm_pat_free_float': value}
+                                    else:  # revenue
+                                        ttm_data = {'ttm_revenue': value} if not is_free_float else {'ttm_revenue_free_float': value}
+
+                                    StockTTMData.objects.update_or_create(
+                                        stock=stock,
+                                        period=period,
+                                        defaults=ttm_data
+                                    )
+                                    stats['ttm_records'] += 1
+
+                                elif category_name.startswith('quarterly_'):
+                                    # Quarterly data uses period format (YYYYMM)
+                                    is_free_float = 'free_float' in category_name
+                                    is_pat = 'pat' in category_name
+
+                                    if is_pat:
+                                        qtr_data = {'quarterly_pat': value} if not is_free_float else {'quarterly_pat_free_float': value}
+                                    else:  # revenue
+                                        qtr_data = {'quarterly_revenue': value} if not is_free_float else {'quarterly_revenue_free_float': value}
+
+                                    StockQuarterlyData.objects.update_or_create(
+                                        stock=stock,
+                                        period=period,
+                                        defaults=qtr_data
+                                    )
+                                    stats['quarterly_records'] += 1
+
+                                elif category_name.startswith('annual_'):
+                                    # Annual ratios use financial year format
+                                    ratio_type = category_name.replace('annual_', '')
+
+                                    ratio_data = {f'{ratio_type}_percentage': value}
+
+                                    StockAnnualRatios.objects.update_or_create(
+                                        stock=stock,
+                                        financial_year=period,
+                                        defaults=ratio_data
+                                    )
+                                    stats['annual_ratios_records'] += 1
+
+                                elif category_name in ['share_price', 'pr_ratio', 'pe_ratio']:
+                                    # Price data uses date format
+                                    try:
+                                        if '-' in period:  # Date format (handle both YYYY-MM-DD and datetime strings)
+                                            # Handle datetime strings like '2025-08-19 00:00:00'
+                                            period_clean = period.split(' ')[0]  # Remove time component if present
+                                            date_obj = datetime.datetime.strptime(period_clean, '%Y-%m-%d').date()
+                                        else:  # YYYYMM format
+                                            year = int(period[:4])
+                                            month = int(period[4:6])
+                                            date_obj = datetime.date(year, month, 28)
+
+                                        # Determine which field to update based on category
+                                        if category_name == 'share_price':
+                                            price_data = {'share_price': value}
+                                        elif category_name == 'pr_ratio':
+                                            price_data = {'pr_ratio': value}
+                                        else:  # pe_ratio
+                                            price_data = {'pe_ratio': value}
+
+                                        StockPrice.objects.update_or_create(
+                                            stock=stock,
+                                            price_date=date_obj,
+                                            defaults=price_data
+                                        )
+                                        stats['price_records'] += 1
+
+                                    except ValueError:
+                                        continue
+
                 except Exception as e:
                     print(f"Error processing row {index}: {str(e)}")
                     stats['skipped_rows'] += 1
                     continue
-        
+
+        print("=== PROCESSING COMPLETED ===")
+        print(f"Summary:")
+        print(f"   - Total stocks: {stats['total_stocks']}")
+        print(f"   - Created: {stats['stocks_created']}, Updated: {stats['stocks_updated']}")
+        print(f"   - Market cap records: {stats['market_cap_records']}")
+        print(f"   - TTM records: {stats['ttm_records']}")
+        print(f"   - Quarterly records: {stats['quarterly_records']}")
+        print(f"   - Annual ratios: {stats['annual_ratios_records']}")
+        print(f"   - Price records: {stats['price_records']}")
+        print(f"   - Skipped rows: {stats['skipped_rows']}")
+
+        # STEP 5: IMPORT VALIDATION TO ENSURE NO DATA LOSS
+        print("Step 5: Validating import completeness...")
+        validation_results = validate_import_completeness(analysis_results, stats, excel_file.name)
+        stats['validation_results'] = validation_results
+
+        if validation_results['has_errors']:
+            print("⚠️  VALIDATION ERRORS DETECTED:")
+            for error in validation_results['errors']:
+                print(f"   - {error}")
+
+        if validation_results['has_warnings']:
+            print("⚠️  VALIDATION WARNINGS:")
+            for warning in validation_results['warnings']:
+                print(f"   - {warning}")
+
+        if not validation_results['has_errors'] and not validation_results['has_warnings']:
+            print("✅ Import validation passed - no data loss detected")
+
         return stats
-        
+
     except Exception as e:
-        raise ValueError(f"Error processing stocks base sheet: {str(e)}")
+        raise ValueError(f"Error in dynamic stock sheet processing: {str(e)}")
 
 @login_required
 def process_amcfs_nav_and_returns(request):
@@ -1320,7 +1623,31 @@ def process_amcfs_nav_and_returns(request):
                 elif file_type == 'stocks_base_sheet':
                     # Process Stocks Base Sheet file
                     stats = process_stocks_base_sheet(excel_file)
-                    messages.success(request, f"Stocks data processed successfully! Created: {stats['stocks_created']}, Updated: {stats['stocks_updated']}, Total Records: {stats['market_cap_records'] + stats['ttm_records'] + stats['quarterly_records'] + stats['annual_ratios_records'] + stats['price_records']}")
+
+                    # Create detailed success message with validation info
+                    total_records = stats['market_cap_records'] + stats['ttm_records'] + stats['quarterly_records'] + stats['annual_ratios_records'] + stats['price_records']
+                    validation_info = ""
+
+                    if 'validation_results' in stats:
+                        validation = stats['validation_results']
+                        if validation.get('has_errors'):
+                            messages.error(request, f"❌ Stock processing completed with errors! Please check data integrity. Errors: {'; '.join(validation['errors'])}")
+                        elif validation.get('has_warnings'):
+                            messages.warning(request, f"⚠️ Stock processing completed with warnings! Data imported but please review. Warnings: {'; '.join(validation['warnings'])}")
+                            validation_info = f" ✅ Validation: {len(validation.get('warnings', []))} warnings detected"
+                        else:
+                            validation_info = " ✅ Validation: No data loss detected"
+
+                    if not stats.get('validation_results', {}).get('has_errors'):
+                        success_msg = (
+                            f"🎉 Stocks data processed successfully! "
+                            f"📊 Stocks: {stats['stocks_created']} created, {stats['stocks_updated']} updated | "
+                            f"📈 Total Records: {total_records} (Market Cap: {stats['market_cap_records']}, "
+                            f"TTM: {stats['ttm_records']}, Quarterly: {stats['quarterly_records']}, "
+                            f"Annual: {stats['annual_ratios_records']}, Price: {stats['price_records']})"
+                            f"{validation_info}"
+                        )
+                        messages.success(request, success_msg)
                 elif file_type == 'underlying_stocks':
                     # Process Underlying Stocks Holdings file
                     stats = process_underlying_stocks_file(excel_file)

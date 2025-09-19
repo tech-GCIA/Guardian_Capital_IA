@@ -270,6 +270,7 @@ class StockPrice(models.Model):
 	stock = models.ForeignKey(Stock, on_delete=models.CASCADE, related_name='price_data')
 	price_date = models.DateField(verbose_name='Price Date')
 	share_price = models.FloatField(null=True, blank=True, verbose_name='Share Price')
+	pr_ratio = models.FloatField(null=True, blank=True, verbose_name='Price to Revenue Ratio')
 	pe_ratio = models.FloatField(null=True, blank=True, verbose_name='PE Ratio')
 
 	created = models.DateTimeField(auto_now_add=True)
@@ -384,3 +385,48 @@ class MetricsCalculationSession(models.Model):
 
 	def __str__(self):
 		return f"Session {self.session_id} - {self.status} ({self.progress_percentage:.1f}%)"
+
+class FileStructureMetadata(models.Model):
+	"""
+	Stores original file layout information to ensure perfect export recreation.
+	Tracks actual column positions for each data type and period.
+	"""
+	file_structure_id = models.AutoField(primary_key=True)
+	upload_session_id = models.CharField(max_length=255, verbose_name='Upload Session ID', db_index=True)
+	original_filename = models.CharField(max_length=500, verbose_name='Original Filename')
+	total_columns = models.IntegerField(verbose_name='Total Columns in Original File')
+
+	# Store column mapping information as JSON
+	market_cap_column_mapping = models.JSONField(null=True, blank=True, verbose_name='Market Cap Column Mapping')
+	ttm_column_mapping = models.JSONField(null=True, blank=True, verbose_name='TTM Column Mapping')
+	quarterly_column_mapping = models.JSONField(null=True, blank=True, verbose_name='Quarterly Column Mapping')
+	annual_column_mapping = models.JSONField(null=True, blank=True, verbose_name='Annual Column Mapping')
+	price_column_mapping = models.JSONField(null=True, blank=True, verbose_name='Price Column Mapping')
+
+	# Store detected periods and their order
+	detected_periods = models.JSONField(null=True, blank=True, verbose_name='Detected Periods')
+
+	# Basic column structure
+	basic_columns_end = models.IntegerField(default=12, verbose_name='Basic Columns End Position')
+	identifiers_start = models.IntegerField(null=True, blank=True, verbose_name='Identifiers Start Position')
+
+	# File processing metadata
+	import_status = models.CharField(max_length=50, default='processing', verbose_name='Import Status')
+	records_imported = models.IntegerField(default=0, verbose_name='Records Imported')
+	validation_errors = models.JSONField(null=True, blank=True, verbose_name='Validation Errors')
+
+	created = models.DateTimeField(auto_now_add=True)
+	modified = models.DateTimeField(auto_now=True)
+
+	class Meta:
+		verbose_name = "File Structure Metadata"
+		verbose_name_plural = "File Structure Metadata"
+		ordering = ['-created']
+		indexes = [
+			models.Index(fields=['upload_session_id']),
+			models.Index(fields=['import_status']),
+			models.Index(fields=['created']),
+		]
+
+	def __str__(self):
+		return f"{self.original_filename} - {self.upload_session_id} ({self.import_status})"

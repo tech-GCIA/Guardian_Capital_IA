@@ -2,6 +2,62 @@
 
 {% block title %}Upload Scheme Details{% endblock %}
 
+{% block extra_css %}
+<style>
+    /* Loading Overlay Styles */
+    #loading-overlay {
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0, 0, 0, 0.7);
+        z-index: 9999;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+    }
+
+    .loading-content {
+        background: white;
+        padding: 30px;
+        border-radius: 10px;
+        text-align: center;
+        box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        max-width: 400px;
+    }
+
+    .loading-content .spinner-border {
+        width: 3rem;
+        height: 3rem;
+    }
+
+    /* Form Enhancements */
+    .form-control, .form-control-file {
+        border-radius: 8px;
+        border: 2px solid #e0e0e0;
+        transition: all 0.3s ease;
+    }
+
+    .form-control:focus, .form-control-file:focus {
+        border-color: #007bff;
+        box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+    }
+
+    .btn-primary {
+        border-radius: 8px;
+        padding: 10px 20px;
+        font-weight: 500;
+        transition: all 0.3s ease;
+    }
+
+    .btn-primary:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+    }
+</style>
+{% endblock %}
+
 {% block content %}
     <h1>Upload Scheme Details</h1>
 
@@ -16,23 +72,37 @@
         </div>
     {% endif %}
 
-    <div class="card">
+    <!-- Loading Overlay -->
+    <div id="loading-overlay" style="display: none;">
+        <div class="loading-content">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+            <h5 class="mt-3">Processing your file...</h5>
+            <p class="text-muted">Please wait while we process your data. This may take a few minutes.</p>
+        </div>
+    </div>
+
+    <div class="card" id="upload-form-card">
         <div class="card-body">
-            <form method="post" enctype="multipart/form-data" action="{% url 'process_amcfs_nav_and_returns' %}">
+            <form method="post" enctype="multipart/form-data" action="{% url 'process_amcfs_nav_and_returns' %}" id="upload-form">
                 {% csrf_token %}
-                
+
                 <div class="form-group mb-3">
                     {{ form.file_type.label_tag }}
                     {{ form.file_type }}
-                    
+
                 </div>
-                
+
                 <div class="form-group mb-3">
                     {{ form.excel_file.label_tag }}
                     {{ form.excel_file }}
                 </div>
-                
-                <button type="submit" class="btn btn-primary">Upload and Process</button>
+
+                <button type="submit" class="btn btn-primary" id="upload-btn">
+                    <span id="btn-text">Upload and Process</span>
+                    <span id="btn-spinner" class="spinner-border spinner-border-sm ms-2" style="display: none;" role="status"></span>
+                </button>
             </form>
         </div>
     </div>
@@ -41,9 +111,8 @@
 {% block extra_js %}
     <script>
         document.addEventListener('DOMContentLoaded', function () {
-            // Select all toast elements on the page
+            // Handle toast notifications
             const toasts = document.querySelectorAll('.toast');
-
             toasts.forEach(toast => {
                 // Delay the fade-out effect for 5 seconds
                 setTimeout(function() {
@@ -55,6 +124,69 @@
                     toast.remove();  // Remove toast after the fade effect is complete
                 }, 6000);  // Wait 1 second after fade for a total of 6 seconds
             });
+
+            // Handle form submission with loader
+            const uploadForm = document.getElementById('upload-form');
+            const uploadBtn = document.getElementById('upload-btn');
+            const btnText = document.getElementById('btn-text');
+            const btnSpinner = document.getElementById('btn-spinner');
+            const loadingOverlay = document.getElementById('loading-overlay');
+            const uploadFormCard = document.getElementById('upload-form-card');
+
+            uploadForm.addEventListener('submit', function(e) {
+                // Get form data
+                const fileInput = document.querySelector('input[type="file"]');
+                const fileTypeSelect = document.querySelector('select[name="file_type"]');
+
+                // Validate form
+                if (!fileInput.files.length) {
+                    e.preventDefault();
+                    alert('Please select a file to upload.');
+                    return;
+                }
+
+                if (!fileTypeSelect.value) {
+                    e.preventDefault();
+                    alert('Please select a file type.');
+                    return;
+                }
+
+                // Show loading state
+                btnText.textContent = 'Processing...';
+                btnSpinner.style.display = 'inline-block';
+                uploadBtn.disabled = true;
+
+                // Show loading overlay after a short delay
+                setTimeout(function() {
+                    loadingOverlay.style.display = 'flex';
+                    uploadFormCard.style.opacity = '0.5';
+                }, 500);
+
+                // Update loading message based on file type
+                const loadingMessage = document.querySelector('.loading-content p');
+                if (fileTypeSelect.value === 'stocks_base_sheet') {
+                    loadingMessage.textContent = 'Processing stock data... This may take a few minutes depending on file size.';
+                } else {
+                    loadingMessage.textContent = 'Processing your file... Please wait.';
+                }
+            });
+
+            // File type change handler
+            const fileTypeSelect = document.querySelector('select[name="file_type"]');
+            if (fileTypeSelect) {
+                fileTypeSelect.addEventListener('change', function() {
+                    const helpText = document.getElementById('file-type-help');
+                    if (helpText) helpText.remove();
+
+                    if (this.value === 'stocks_base_sheet') {
+                        const helpDiv = document.createElement('div');
+                        helpDiv.id = 'file-type-help';
+                        helpDiv.className = 'form-text text-info mt-2';
+                        helpDiv.innerHTML = '<i class="fas fa-info-circle"></i> Stock Base Sheet processing supports dynamic column detection and handles any number of time periods.';
+                        this.parentNode.appendChild(helpDiv);
+                    }
+                });
+            }
         });
     </script>
 {% endblock %}
