@@ -1396,11 +1396,10 @@ class PortfolioMetricsCalculator:
                 # Get stock's financial data for this period for portfolio aggregation
                 stock = holding.stock
 
-                # Get market cap data closest to this period
+                # Get latest market cap data (like update_fund_latest_metrics_weighted does)
                 from gcia_app.models import StockMarketCap
                 market_cap_data = StockMarketCap.objects.filter(
-                    stock=stock,
-                    date__lte=period_date
+                    stock=stock
                 ).order_by('-date').first()
 
                 if market_cap_data and market_cap_data.market_cap:

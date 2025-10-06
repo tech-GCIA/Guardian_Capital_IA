@@ -30,6 +30,7 @@ class FundPortfolioExportGenerator(BlockBasedExportGenerator):
         """Initialize with specific fund scheme"""
         super().__init__()
         self.scheme = scheme
+        self.section_start_columns = {}  # Track where each data section starts for metric rows
 
     def _define_block_structure(self, periods):
         """
@@ -40,21 +41,18 @@ class FundPortfolioExportGenerator(BlockBasedExportGenerator):
             {
                 'name': 'basic_info',
                 'type': 'fixed',
-                'size': 13,
+                'size': 18,  # Expanded: removed S.No, added Market Cap, moved fund data here, added Share Price & Free Float
                 'columns': [
-                    'S. No.', 'Company Name', 'Accord Code', 'Sector', 'Cap',
-                    'Free Float', '6 Year CAGR', 'TTM', '6 Year CAGR', 'TTM',
+                    'Company Name', 'Accord Code', 'Sector', 'Cap',
+                    'Market Cap', 'Weights', 'Factor', 'Value', 'No.of shares',
+                    'Share Price', 'Free Float',
+                    '6 Year CAGR', 'TTM', '6 Year CAGR', 'TTM',
                     'Current', '2 Yr Avg', 'Reval/deval'
-                ]
+                ],
+                'row6_label': None,  # First 11 columns have no category
+                'row7_label': None
             },
             {'name': 'sep_0', 'type': 'separator', 'size': 1},
-            {
-                'name': 'fund_data',
-                'type': 'fixed',
-                'size': 4,
-                'columns': ['Weights', 'Factor', 'Value', 'No.of shares']
-            },
-            {'name': 'sep_1', 'type': 'separator', 'size': 1},
             {
                 'name': 'market_cap',
                 'type': 'dynamic',
@@ -284,32 +282,56 @@ class FundPortfolioExportGenerator(BlockBasedExportGenerator):
 
             elif block['type'] == 'fixed':
                 if block['name'] == 'basic_info':
-                    # Basic stock info (13 columns)
-                    row_data[current_col] = ''  # S.No (will be filled with row number)
-                    row_data[current_col + 1] = stock.company_name
-                    row_data[current_col + 2] = stock.accord_code or ''
-                    row_data[current_col + 3] = stock.sector or ''
-                    row_data[current_col + 4] = stock.cap or ''
-                    row_data[current_col + 5] = stock.free_float or ''
-                    row_data[current_col + 6] = stock.revenue_6yr_cagr or ''
-                    row_data[current_col + 7] = stock.revenue_ttm or ''
-                    row_data[current_col + 8] = stock.pat_6yr_cagr or ''
-                    row_data[current_col + 9] = stock.pat_ttm or ''
-                    row_data[current_col + 10] = stock.current_value or ''
-                    row_data[current_col + 11] = stock.two_yr_avg or ''
-                    row_data[current_col + 12] = stock.reval_deval or ''
-                    current_col += 13
+                    # 18 columns: Company info + Fund Data + Share Price + Free Float + Fundamentals
+                    from .models import StockMarketCap, StockPrice, FundMetricsLog
 
-                elif block['name'] == 'fund_data':
-                    # Fund-specific data (4 columns)
+                    # Col 1: Company Name (NO S.No!)
+                    row_data[current_col] = stock.company_name
+
+                    # Col 2: Accord Code
+                    row_data[current_col + 1] = stock.accord_code or ''
+
+                    # Col 3: Sector
+                    row_data[current_col + 2] = stock.sector or 'Unknown'
+
+                    # Col 4: Cap
+                    row_data[current_col + 3] = stock.cap or 'Unknown'
+
+                    # Col 5: Market Cap (latest)
+                    market_cap_data = StockMarketCap.objects.filter(stock=stock).order_by('-date').first()
+                    row_data[current_col + 4] = market_cap_data.market_cap if market_cap_data else None
+
+                    # Col 6-9: Fund Data
                     weights = (holding.holding_percentage / 100) if holding.holding_percentage else 0
                     factor = (holding.market_value / total_portfolio_value) if holding.market_value and total_portfolio_value else 0
+                    row_data[current_col + 5] = weights
+                    row_data[current_col + 6] = factor
+                    row_data[current_col + 7] = holding.market_value or 0
+                    row_data[current_col + 8] = holding.number_of_shares or 0
 
-                    row_data[current_col] = weights
-                    row_data[current_col + 1] = factor
-                    row_data[current_col + 2] = holding.market_value or 0
-                    row_data[current_col + 3] = holding.number_of_shares or 0
-                    current_col += 4
+                    # Col 10: Share Price
+                    price_data = StockPrice.objects.filter(stock=stock).order_by('-price_date').first()
+                    row_data[current_col + 9] = price_data.share_price if price_data else None
+
+                    # Col 11: Free Float
+                    row_data[current_col + 10] = stock.free_float if stock.free_float else 0
+
+                    # Col 12-18: Fundamentals (get from latest metrics)
+                    latest_metrics = FundMetricsLog.objects.filter(
+                        scheme=self.scheme,
+                        stock=stock
+                    ).order_by('-period_date').first()
+
+                    if latest_metrics:
+                        row_data[current_col + 11] = latest_metrics.revenue_6yr_cagr
+                        row_data[current_col + 12] = None  # TTM Revenue
+                        row_data[current_col + 13] = latest_metrics.pat_6yr_cagr
+                        row_data[current_col + 14] = None  # TTM PAT
+                        row_data[current_col + 15] = latest_metrics.current_pr
+                        row_data[current_col + 16] = latest_metrics.pr_2yr_avg
+                        row_data[current_col + 17] = latest_metrics.pr_2yr_reval_deval
+
+                    current_col += 18
 
                 elif block['name'] == 'identifiers':
                     # Stock identifiers (3 columns)
@@ -319,8 +341,12 @@ class FundPortfolioExportGenerator(BlockBasedExportGenerator):
                     current_col += 3
 
             elif block['type'] == 'dynamic':
-                # Populate dynamic data columns using parent's logic
+                # Track section start column for metric rows
                 data_type = block['data_type']
+                if data_type not in self.section_start_columns:
+                    self.section_start_columns[data_type] = current_col
+
+                # Populate dynamic data columns using parent's logic
                 periods = block['periods']
 
                 for period in periods:
@@ -445,8 +471,17 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
     row_1[0] = scheme.name
     ws.append(row_1)
 
-    # Add Row 2-8: Block-based headers
-    for row_num in range(2, 9):
+    # Add Row 2: Column indicators
+    ws.append(headers['row_2'])
+
+    # Add Row 3: Portfolio as on: [date]
+    latest_date = max(periods['market_cap_dates']) if periods['market_cap_dates'] else None
+    row_3_text = f"Portfolio as on: {latest_date.strftime('%d %B %Y')}" if latest_date else "Portfolio as on: N/A"
+    row_3 = [row_3_text] + [''] * (total_columns - 1)
+    ws.append(row_3)
+
+    # Add Rows 4-8: Remaining headers (blank rows + category headers + detail headers)
+    for row_num in range(3, 9):
         header_row = headers[f'row_{row_num}']
         ws.append(header_row)
 
@@ -455,7 +490,7 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
 
     for idx, holding in enumerate(holdings, start=1):
         row_data = generator.populate_fund_stock_row(holding, blocks, total_columns)
-        row_data[0] = idx  # Set S.No
+        # NOTE: No S.No column - removed as per user requirement
         ws.append(row_data)
 
     # Add TOTALS row
@@ -463,19 +498,21 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
     total_market_cap = sum(h.market_value or 0 for h in holdings if h.market_value)
     total_holdings_pct = sum(h.holding_percentage or 0 for h in holdings if h.holding_percentage)
 
-    # Find column indices for totals in block structure
-    # Basic info: columns 0-12, sep: 13, fund_data: columns 14-17
-    totals_row[4] = total_market_cap  # Cap column in basic_info
-    totals_row[14] = total_holdings_pct / 100 if total_holdings_pct else 0  # Weights in fund_data
-    totals_row[16] = total_market_cap  # Value in fund_data
+    # Column indices for totals in new structure (no S.No column):
+    # basic_info has 18 columns: Company Name(0), Accord Code(1), Sector(2), Cap(3),
+    #                            Market Cap(4), Weights(5), Factor(6), Value(7), No.of shares(8),
+    #                            Share Price(9), Free Float(10), Fundamentals(11-17)
+    totals_row[4] = total_market_cap  # Column 5: Market Cap
+    totals_row[5] = total_holdings_pct / 100 if total_holdings_pct else 0  # Column 6: Weights
+    totals_row[7] = total_market_cap  # Column 8: Value
 
     ws.append(totals_row)
 
-    # NOTE: In block-based structure, portfolio metrics are not added as separate rows at bottom
-    # All stock data including metrics are in the stock rows themselves
-    # Portfolio-level weighted metrics are stored in PortfolioMetricsLog table for future use
+    # Add 27 portfolio metric rows at bottom (22 with data + 5 blank)
+    logger.info("Adding portfolio metric rows")
+    add_portfolio_metric_rows(ws, scheme, generator.section_start_columns, periods, total_columns)
 
-    logger.info("Block-based export completed - all data is in stock rows with block structure")
+    logger.info("Block-based export completed with portfolio metrics")
 
     # Apply formatting
     apply_portfolio_analysis_formatting(ws, total_columns)
@@ -560,3 +597,84 @@ def apply_portfolio_analysis_formatting(ws, total_columns):
     ws.column_dimensions['D'].width = 10  # Cap
 
     logger.info("Excel formatting applied successfully with metric row highlighting")
+
+
+def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_columns):
+    """
+    Add 27 portfolio metric rows at bottom with values mapped to correct data sections
+
+    Args:
+        ws: Worksheet object
+        scheme: AMCFundScheme instance
+        section_start_columns: Dict mapping data_type to column index
+        periods: Dict with period lists (ttm_periods, quarterly_periods, etc.)
+        total_columns: Total number of columns in sheet
+    """
+    from gcia_app.models import PortfolioMetricsLog
+
+    # Get all portfolio metrics for this fund
+    portfolio_metrics_query = PortfolioMetricsLog.objects.filter(
+        scheme=scheme
+    ).order_by('-period_date')
+
+    # Create period lookup
+    metrics_by_period = {pm.period_date: pm for pm in portfolio_metrics_query}
+
+    # Get all periods (TTM + Quarterly combined, sorted descending)
+    all_ttm_periods = sorted(periods.get('ttm_periods', []), reverse=True)
+    all_quarterly_periods = sorted(periods.get('quarterly_periods', []), reverse=True)
+
+    # Define 27 metric rows (22 with data + 5 blank)
+    # Format: (field_name, label, section_type, periods_list)
+    metric_definitions = [
+        ('patm', 'PATM', 'ttm_pat', all_ttm_periods),
+        ('qoq_growth', 'QoQ', 'quarterly_revenue', all_quarterly_periods),
+        ('yoy_growth', 'YoY', 'ttm_revenue', all_ttm_periods),
+        ('revenue_6yr_cagr', '6 year CAGR', 'ttm_revenue', all_ttm_periods),
+        (None, None, None, None),  # Blank row
+        ('current_pe', 'Current PE', 'market_cap_free_float', all_ttm_periods),
+        ('pe_2yr_avg', '2 year average', 'market_cap_free_float', all_ttm_periods),
+        ('pe_5yr_avg', '5 year average', 'market_cap_free_float', all_ttm_periods),
+        ('pe_2yr_reval_deval', '2 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
+        ('pe_5yr_reval_deval', '5 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
+        (None, None, None, None),  # Blank row
+        ('current_pr', 'Current PR', 'market_cap_free_float', all_ttm_periods),
+        ('pr_2yr_avg', '2 year average', 'market_cap_free_float', all_ttm_periods),
+        ('pr_5yr_avg', '5 year average', 'market_cap_free_float', all_ttm_periods),
+        ('pr_2yr_reval_deval', '2 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
+        ('pr_5yr_reval_deval', '5 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
+        (None, None, None, None),  # Blank row
+        ('pr_10q_low', '10 quarter- PR- low', 'market_cap_free_float', all_ttm_periods),
+        ('pr_10q_high', '10 quarter- PR- high', 'market_cap_free_float', all_ttm_periods),
+        (None, None, None, None),  # Blank row
+        ('alpha_bond_cagr', 'Alpha over the bond- CAGR', 'market_cap_free_float', all_ttm_periods),
+        ('alpha_absolute', 'Alpha- Absolute', 'market_cap_free_float', all_ttm_periods),
+        ('pe_yield', 'PE Yield', 'market_cap_free_float', all_ttm_periods),
+        ('growth_rate', 'Growth', 'market_cap_free_float', all_ttm_periods),
+        ('bond_rate', 'Bond Rate', 'market_cap_free_float', all_ttm_periods),
+        (None, None, None, None),  # Blank row
+        (None, None, None, None),  # Blank row
+    ]
+
+    # For each metric, create a row
+    for metric_field, metric_label, section_type, periods_list in metric_definitions:
+        metric_row = [''] * total_columns
+        metric_row[0] = metric_label if metric_label else ''  # Label in Column A
+
+        if metric_field and section_type:  # Skip blank rows
+            # Get section start column
+            section_start_col = section_start_columns.get(section_type)
+
+            if section_start_col is not None and periods_list:
+                # Populate values for each period in this section
+                for period_idx, period in enumerate(periods_list):
+                    col_idx = section_start_col + period_idx
+
+                    if col_idx < total_columns:
+                        # Get portfolio metric for this period
+                        pm = metrics_by_period.get(period)
+                        if pm:
+                            value = getattr(pm, metric_field, None)
+                            metric_row[col_idx] = value
+
+        ws.append(metric_row)
