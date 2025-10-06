@@ -2178,8 +2178,11 @@ def fund_analysis_metrics_view(request):
     """
     Display page with dropdown to select mutual funds for analysis
     """
-    # Get all active mutual fund schemes
-    funds = AMCFundScheme.objects.filter(is_active=True).order_by('name')
+    # Get only active mutual fund schemes that have underlying stock holdings
+    funds = AMCFundScheme.objects.filter(
+        holdings__isnull=False,  # Must have holdings mapped
+        is_active=True
+    ).distinct().order_by('name')  # Distinct to avoid duplicates from multiple holdings
 
     context = {
         'funds': funds,

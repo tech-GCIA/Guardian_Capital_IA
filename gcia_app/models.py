@@ -386,6 +386,56 @@ class MetricsCalculationSession(models.Model):
 	def __str__(self):
 		return f"Session {self.session_id} - {self.status} ({self.progress_percentage:.1f}%)"
 
+class PortfolioMetricsLog(models.Model):
+	"""
+	Stores portfolio-level weighted metrics for each fund across all periods
+	Metrics calculated following Excel methodology with proper weighting
+	"""
+	portfolio_metrics_log_id = models.AutoField(primary_key=True)
+	scheme = models.ForeignKey(AMCFundScheme, on_delete=models.CASCADE, related_name='portfolio_metrics')
+	period_date = models.DateField(verbose_name='Period Date')
+	period_type = models.CharField(max_length=20, verbose_name='Period Type')  # 'quarterly', 'ttm', 'annual'
+
+	# 22 Weighted Portfolio Metrics (Excel Methodology)
+	patm = models.FloatField(null=True, blank=True, verbose_name='Portfolio PATM')
+	qoq_growth = models.FloatField(null=True, blank=True, verbose_name='Portfolio QoQ Growth')
+	yoy_growth = models.FloatField(null=True, blank=True, verbose_name='Portfolio YoY Growth')
+	revenue_6yr_cagr = models.FloatField(null=True, blank=True, verbose_name='Portfolio Revenue 6Y CAGR')
+	pat_6yr_cagr = models.FloatField(null=True, blank=True, verbose_name='Portfolio PAT 6Y CAGR')
+	current_pe = models.FloatField(null=True, blank=True, verbose_name='Portfolio Current PE')
+	pe_2yr_avg = models.FloatField(null=True, blank=True, verbose_name='Portfolio PE 2Y Avg')
+	pe_5yr_avg = models.FloatField(null=True, blank=True, verbose_name='Portfolio PE 5Y Avg')
+	pe_2yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Portfolio PE 2Y Reval/Deval')
+	pe_5yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Portfolio PE 5Y Reval/Deval')
+	current_pr = models.FloatField(null=True, blank=True, verbose_name='Portfolio Current PR')
+	pr_2yr_avg = models.FloatField(null=True, blank=True, verbose_name='Portfolio PR 2Y Avg')
+	pr_5yr_avg = models.FloatField(null=True, blank=True, verbose_name='Portfolio PR 5Y Avg')
+	pr_2yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Portfolio PR 2Y Reval/Deval')
+	pr_5yr_reval_deval = models.FloatField(null=True, blank=True, verbose_name='Portfolio PR 5Y Reval/Deval')
+	pr_10q_low = models.FloatField(null=True, blank=True, verbose_name='Portfolio PR 10Q Low')
+	pr_10q_high = models.FloatField(null=True, blank=True, verbose_name='Portfolio PR 10Q High')
+	alpha_bond_cagr = models.FloatField(null=True, blank=True, verbose_name='Portfolio Alpha Bond CAGR')
+	alpha_absolute = models.FloatField(null=True, blank=True, verbose_name='Portfolio Alpha Absolute')
+	pe_yield = models.FloatField(null=True, blank=True, verbose_name='Portfolio PE Yield')
+	growth_rate = models.FloatField(null=True, blank=True, verbose_name='Portfolio Growth Rate')
+	bond_rate = models.FloatField(null=True, blank=True, verbose_name='Bond Rate')
+
+	created = models.DateTimeField(auto_now_add=True)
+	modified = models.DateTimeField(auto_now=True)
+
+	class Meta:
+		unique_together = ['scheme', 'period_date', 'period_type']
+		verbose_name = "Portfolio Metrics Log"
+		verbose_name_plural = "Portfolio Metrics Logs"
+		ordering = ['-period_date', 'scheme']
+		indexes = [
+			models.Index(fields=['scheme', 'period_date']),
+			models.Index(fields=['scheme', 'period_type']),
+		]
+
+	def __str__(self):
+		return f"{self.scheme.name} - {self.period_date} ({self.period_type})"
+
 class FileStructureMetadata(models.Model):
 	"""
 	Stores original file layout information to ensure perfect export recreation.

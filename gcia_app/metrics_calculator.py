@@ -213,12 +213,13 @@ class PortfolioMetricsCalculator:
         # Phase 3: Metrics calculation
         phase_start = time.time()
 
-        # Track latest metrics for portfolio-level weighted aggregation
+        # Track metrics for ALL periods for comprehensive portfolio analysis
         latest_period_date = None
-        latest_period_holdings_metrics = []  # Store [(holding, metrics), ...]
+        latest_period_holdings_metrics = []  # Store [(holding, metrics, period_date, period_type), ...] for latest period only
+        all_period_holdings_metrics = []  # Store [(holding, metrics, period_date, period_type), ...] for ALL periods
         processed_stocks = 0
 
-        logger.info(f"⚡ Phase 3 - Starting optimized metrics calculation for {holdings_count} stocks")
+        logger.info(f"⚡ Phase 3 - Starting comprehensive metrics calculation for {holdings_count} stocks across ALL periods")
 
         for holding in holdings:
             stock = holding.stock
@@ -234,57 +235,61 @@ class PortfolioMetricsCalculator:
 
             logger.debug(f"Processing equity stock: {stock.company_name}")
 
-            # OPTIMIZATION: Get only the latest period for portfolio calculation speed
-            periods = self.get_latest_period_optimized(stock, stock_data_cache[stock.stock_id], limit_periods)
+            # NEW: Get ALL periods for comprehensive portfolio analysis (not just latest)
+            all_periods = self.get_all_periods_optimized(stock, stock_data_cache[stock.stock_id], limit_periods)
 
-            if not periods:
+            if not all_periods:
                 logger.warning(f"No financial periods found for equity stock {stock.company_name} - insufficient data for metrics calculation")
                 continue
 
-            # OPTIMIZATION: Only calculate latest period metrics for portfolio aggregation
-            latest_period = periods[0]  # Get the most recent period
+            # Calculate metrics for ALL periods (not just latest)
+            for period in all_periods:
+                try:
+                    metrics = self.calculate_metrics_for_period_cached(
+                        stock, period, stock_data_cache[stock.stock_id]
+                    )
 
-            try:
-                metrics = self.calculate_metrics_for_period_cached(
-                    stock, latest_period, stock_data_cache[stock.stock_id]
-                )
+                    # Convert period date to proper format for DateField
+                    period_date = period['date']
 
-                # Convert period date to proper format for DateField
-                period_date = latest_period['date']
+                    # Handle different date formats
+                    if isinstance(period_date, str):
+                        if len(period_date) == 6:  # YYYYMM format (TTM/Quarterly)
+                            from datetime import datetime
+                            try:
+                                year = int(period_date[:4])
+                                month = int(period_date[4:6])
+                                period_date = datetime(year, month, 1).date()
+                            except (ValueError, IndexError) as e:
+                                logger.error(f"Error converting period date {period_date}: {e}")
+                                continue  # Skip this period if date conversion fails
+                        else:
+                            # Try to parse other string date formats
+                            from datetime import datetime
+                            try:
+                                period_date = datetime.strptime(str(period_date), '%Y-%m-%d').date()
+                            except ValueError:
+                                logger.error(f"Unable to parse date format: {period_date}")
+                                continue  # Skip this period if date conversion fails
+                    elif not hasattr(period_date, 'year'):  # Not a date object
+                        logger.error(f"Invalid date type: {type(period_date)} for {period_date}")
+                        continue  # Skip this period
 
-                # Handle different date formats
-                if isinstance(period_date, str):
-                    if len(period_date) == 6:  # YYYYMM format (TTM/Quarterly)
-                        from datetime import datetime
-                        try:
-                            year = int(period_date[:4])
-                            month = int(period_date[4:6])
-                            period_date = datetime(year, month, 1).date()
-                        except (ValueError, IndexError) as e:
-                            logger.error(f"Error converting period date {period_date}: {e}")
-                            continue  # Skip this stock if date conversion fails
-                    else:
-                        # Try to parse other string date formats
-                        from datetime import datetime
-                        try:
-                            period_date = datetime.strptime(str(period_date), '%Y-%m-%d').date()
-                        except ValueError:
-                            logger.error(f"Unable to parse date format: {period_date}")
-                            continue  # Skip this stock if date conversion fails
-                elif not hasattr(period_date, 'year'):  # Not a date object
-                    logger.error(f"Invalid date type: {type(period_date)} for {period_date}")
-                    continue  # Skip this stock
+                    # Store for batch processing (ALL periods)
+                    all_period_holdings_metrics.append((holding, metrics, period_date, period['type']))
 
-                # OPTIMIZATION: Defer database saves for batch processing
-                latest_period_holdings_metrics.append((holding, metrics, period_date, latest_period['type']))
+                    # Track global latest period and store latest period metrics separately
+                    if not latest_period_date or period_date > latest_period_date:
+                        latest_period_date = period_date
+                        # Clear and store only latest period metrics for AMCFundScheme update
+                        latest_period_holdings_metrics = [(holding, metrics, period_date, period['type'])]
+                    elif latest_period_date and period_date == latest_period_date:
+                        # Same date as latest - add to latest period metrics
+                        latest_period_holdings_metrics.append((holding, metrics, period_date, period['type']))
 
-                # Track global latest period
-                if not latest_period_date or period_date > latest_period_date:
-                    latest_period_date = period_date
-
-            except Exception as e:
-                logger.error(f"Error calculating metrics for {stock.company_name}: {e}")
-                continue
+                except Exception as e:
+                    logger.error(f"Error calculating metrics for {stock.company_name} period {period['date']}: {e}")
+                    continue
 
             processed_stocks += 1
 
@@ -294,21 +299,25 @@ class PortfolioMetricsCalculator:
         # Phase 4: Database batch operations
         phase_start = time.time()
 
-        # OPTIMIZATION: Batch database operations for performance
-        logger.info(f"Batch processing {len(latest_period_holdings_metrics)} metric entries")
-        self.batch_save_metrics(scheme, latest_period_holdings_metrics)
+        # OPTIMIZATION: Batch save metrics for ALL periods (not just latest)
+        logger.info(f"Batch processing {len(all_period_holdings_metrics)} metric entries across ALL periods")
+        self.batch_save_metrics(scheme, all_period_holdings_metrics)
 
-        # Extract holdings and metrics for portfolio aggregation
+        # Extract holdings and metrics for portfolio aggregation (latest period only for AMCFundScheme)
         portfolio_holdings_metrics = [(item[0], item[1]) for item in latest_period_holdings_metrics]
 
         performance_stats['phases']['database_operations'] = time.time() - phase_start
-        logger.info(f"💾 Phase 4 - Database operations completed: {performance_stats['phases']['database_operations']:.2f}s for {len(latest_period_holdings_metrics)} records")
+        logger.info(f"💾 Phase 4 - Database operations completed: {performance_stats['phases']['database_operations']:.2f}s for {len(all_period_holdings_metrics)} records")
 
         # Phase 5: Portfolio aggregation
         phase_start = time.time()
 
-        # Update AMCFundScheme with weighted portfolio-level aggregated metrics
+        # Update AMCFundScheme with weighted portfolio-level aggregated metrics (latest period only)
         self.update_fund_latest_metrics_weighted(scheme, portfolio_holdings_metrics)
+
+        # NEW: Calculate and save portfolio-level metrics for ALL periods
+        logger.info(f"Calculating portfolio-level weighted metrics for ALL periods")
+        self.calculate_portfolio_metrics_all_periods(scheme, all_period_holdings_metrics)
 
         performance_stats['phases']['portfolio_aggregation'] = time.time() - phase_start
         logger.info(f"📈 Phase 5 - Portfolio aggregation completed: {performance_stats['phases']['portfolio_aggregation']:.2f}s")
@@ -360,6 +369,36 @@ class PortfolioMetricsCalculator:
             return [latest_periods[0]]  # Return only the most recent period
 
         return []
+
+    def get_all_periods_optimized(self, stock, cached_data, limit_periods=None):
+        """
+        NEW: Get ALL periods from cached data for comprehensive portfolio analysis
+        Returns all TTM and quarterly periods sorted by date descending
+        """
+        all_periods = []
+
+        # Get all TTM periods from cache
+        ttm_data = cached_data['ttm_data']
+        if ttm_data:
+            for ttm in ttm_data:
+                all_periods.append({'date': ttm.period, 'type': 'ttm'})
+
+        # Get all quarterly periods from cache
+        quarterly_data = cached_data['quarterly_data']
+        if quarterly_data:
+            for quarterly in quarterly_data:
+                all_periods.append({'date': quarterly.period, 'type': 'quarterly'})
+
+        # Sort by date descending (latest first)
+        if all_periods:
+            all_periods.sort(key=lambda x: x['date'], reverse=True)
+
+            # Apply limit if specified
+            if limit_periods and limit_periods.get('apply_limit'):
+                max_periods = limit_periods.get('max_periods', 10)
+                all_periods = all_periods[:max_periods]
+
+        return all_periods
 
     def calculate_metrics_for_period_cached(self, stock, period, cached_data):
         """
@@ -1300,6 +1339,176 @@ class PortfolioMetricsCalculator:
 
         logger.info(f"Successfully updated weighted portfolio metrics for fund: {scheme.name}")
         logger.info(f"Updated {len(weighted_metrics)} metrics with proper Excel-style weighting")
+
+    def calculate_portfolio_metrics_all_periods(self, scheme, all_period_holdings_metrics):
+        """
+        NEW: Calculate portfolio-level weighted metrics for ALL periods and save to PortfolioMetricsLog
+        Similar to update_fund_latest_metrics_weighted but for ALL periods instead of just latest
+        """
+        from gcia_app.models import PortfolioMetricsLog
+        from django.utils import timezone
+        from collections import defaultdict
+
+        if not all_period_holdings_metrics:
+            logger.warning(f"No holdings metrics data for ALL periods for fund {scheme.name}")
+            return
+
+        logger.info(f"Calculating portfolio-level weighted metrics for ALL periods for {scheme.name}")
+
+        # Group metrics by period_date and period_type
+        period_groups = defaultdict(list)
+        for holding, metrics, period_date, period_type in all_period_holdings_metrics:
+            period_groups[(period_date, period_type)].append((holding, metrics))
+
+        logger.info(f"Found {len(period_groups)} unique periods to calculate portfolio metrics for")
+
+        # Prepare portfolio metrics records for batch creation
+        portfolio_metrics_records = []
+
+        for (period_date, period_type), holdings_metrics in period_groups.items():
+            # Calculate total portfolio value for this period
+            total_portfolio_value = sum(holding.market_value or 0 for holding, _ in holdings_metrics)
+
+            if total_portfolio_value == 0:
+                logger.debug(f"Skipping period {period_date} ({period_type}) - zero portfolio value")
+                continue
+
+            # Initialize weighted metric sums for this period
+            weighted_metrics = {}
+
+            # Define metrics that should be calculated from portfolio financials
+            ratio_metrics = {'patm', 'current_pe', 'current_pr'}
+
+            # Prepare aggregated portfolio financials for ratio calculations
+            portfolio_financials = {
+                'market_cap': 0,
+                'ttm_revenue': 0,
+                'ttm_pat': 0
+            }
+
+            # Calculate weighted metrics for this period
+            for holding, metrics in holdings_metrics:
+                weight = (holding.market_value / total_portfolio_value) if holding.market_value else 0
+
+                if weight == 0:
+                    continue
+
+                # Get stock's financial data for this period for portfolio aggregation
+                stock = holding.stock
+
+                # Get market cap data closest to this period
+                from gcia_app.models import StockMarketCap
+                market_cap_data = StockMarketCap.objects.filter(
+                    stock=stock,
+                    date__lte=period_date
+                ).order_by('-date').first()
+
+                if market_cap_data and market_cap_data.market_cap:
+                    portfolio_financials['market_cap'] += market_cap_data.market_cap * weight
+
+                # Get TTM/Quarterly data for this period
+                from gcia_app.models import StockTTMData, StockQuarterlyData
+
+                if period_type == 'ttm':
+                    ttm_data = StockTTMData.objects.filter(stock=stock, period=period_date).first()
+                    if ttm_data:
+                        if ttm_data.ttm_revenue:
+                            portfolio_financials['ttm_revenue'] += ttm_data.ttm_revenue * weight
+                        if ttm_data.ttm_pat:
+                            portfolio_financials['ttm_pat'] += ttm_data.ttm_pat * weight
+                elif period_type == 'quarterly':
+                    quarterly_data = StockQuarterlyData.objects.filter(stock=stock, period=period_date).first()
+                    if quarterly_data:
+                        if quarterly_data.revenue:
+                            portfolio_financials['ttm_revenue'] += quarterly_data.revenue * weight
+                        if quarterly_data.pat:
+                            portfolio_financials['ttm_pat'] += quarterly_data.pat * weight
+
+                # Weight all other metrics
+                for metric_name, value in metrics.items():
+                    if value is not None and metric_name not in ratio_metrics:
+                        if metric_name not in weighted_metrics:
+                            weighted_metrics[metric_name] = 0
+                        weighted_metrics[metric_name] += value * weight
+
+            # Calculate ratio metrics from aggregated portfolio financials
+            if portfolio_financials['ttm_revenue'] and portfolio_financials['ttm_revenue'] != 0:
+                if portfolio_financials['ttm_pat']:
+                    weighted_metrics['patm'] = (portfolio_financials['ttm_pat'] / portfolio_financials['ttm_revenue']) * 100
+                if portfolio_financials['market_cap']:
+                    weighted_metrics['current_pr'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_revenue']
+
+            if portfolio_financials['ttm_pat'] and portfolio_financials['ttm_pat'] != 0:
+                if portfolio_financials['market_cap']:
+                    weighted_metrics['current_pe'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_pat']
+
+            # Create PortfolioMetricsLog record
+            portfolio_metrics_records.append(PortfolioMetricsLog(
+                scheme=scheme,
+                period_date=period_date,
+                period_type=period_type,
+                patm=weighted_metrics.get('patm'),
+                qoq_growth=weighted_metrics.get('qoq_growth'),
+                yoy_growth=weighted_metrics.get('yoy_growth'),
+                revenue_6yr_cagr=weighted_metrics.get('revenue_6yr_cagr'),
+                pat_6yr_cagr=weighted_metrics.get('pat_6yr_cagr'),
+                current_pe=weighted_metrics.get('current_pe'),
+                pe_2yr_avg=weighted_metrics.get('pe_2yr_avg'),
+                pe_5yr_avg=weighted_metrics.get('pe_5yr_avg'),
+                pe_2yr_reval_deval=weighted_metrics.get('pe_2yr_reval_deval'),
+                pe_5yr_reval_deval=weighted_metrics.get('pe_5yr_reval_deval'),
+                current_pr=weighted_metrics.get('current_pr'),
+                pr_2yr_avg=weighted_metrics.get('pr_2yr_avg'),
+                pr_5yr_avg=weighted_metrics.get('pr_5yr_avg'),
+                pr_2yr_reval_deval=weighted_metrics.get('pr_2yr_reval_deval'),
+                pr_5yr_reval_deval=weighted_metrics.get('pr_5yr_reval_deval'),
+                pr_10q_low=weighted_metrics.get('pr_10q_low'),
+                pr_10q_high=weighted_metrics.get('pr_10q_high'),
+                alpha_bond_cagr=weighted_metrics.get('alpha_bond_cagr'),
+                alpha_absolute=weighted_metrics.get('alpha_absolute'),
+                pe_yield=weighted_metrics.get('pe_yield'),
+                growth_rate=weighted_metrics.get('growth_rate'),
+                bond_rate=weighted_metrics.get('bond_rate')
+            ))
+
+        # Batch save all portfolio metrics
+        if portfolio_metrics_records:
+            logger.info(f"Saving {len(portfolio_metrics_records)} portfolio metrics records to database")
+            self.batch_save_portfolio_metrics(scheme, portfolio_metrics_records)
+            logger.info(f"Successfully saved portfolio metrics for {len(portfolio_metrics_records)} periods")
+        else:
+            logger.warning(f"No portfolio metrics records to save for fund {scheme.name}")
+
+    def batch_save_portfolio_metrics(self, scheme, portfolio_metrics_records):
+        """
+        NEW: Batch save portfolio metrics to database with update_or_create logic
+        Similar to batch_save_metrics but for PortfolioMetricsLog
+        """
+        from gcia_app.models import PortfolioMetricsLog
+
+        if not portfolio_metrics_records:
+            return
+
+        logger.info(f"Batch saving {len(portfolio_metrics_records)} portfolio metrics records")
+
+        # Delete existing records for this scheme to avoid duplicates
+        deleted_count = PortfolioMetricsLog.objects.filter(scheme=scheme).delete()[0]
+        if deleted_count > 0:
+            logger.info(f"Deleted {deleted_count} existing portfolio metrics records for fund {scheme.name}")
+
+        # Bulk create new records
+        try:
+            PortfolioMetricsLog.objects.bulk_create(portfolio_metrics_records, batch_size=500)
+            logger.info(f"Successfully bulk created {len(portfolio_metrics_records)} portfolio metrics records")
+        except Exception as e:
+            logger.error(f"Error in bulk_create for portfolio metrics: {e}")
+            # Fallback to individual saves
+            logger.info("Falling back to individual saves for portfolio metrics")
+            for record in portfolio_metrics_records:
+                try:
+                    record.save()
+                except Exception as save_error:
+                    logger.error(f"Error saving portfolio metric for period {record.period_date}: {save_error}")
 
     def update_progress(self, **kwargs):
         """Update progress session with new values"""
