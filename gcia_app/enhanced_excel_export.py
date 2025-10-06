@@ -269,9 +269,17 @@ class FundPortfolioExportGenerator(BlockBasedExportGenerator):
         # Call parent to get base headers
         headers = super()._generate_import_style_headers(blocks, total_columns)
 
+        # Clear parent's incorrect fundamental headers at columns 6-10
+        # Parent class hardcodes "Stock Fundamentals" at 6-12 for Stock Base Sheet
+        # But Fund Analysis has different structure: fundamentals are at 11-17
+        for col_idx in range(6, 11):
+            if col_idx < total_columns:
+                headers['row_6'][col_idx] = ''  # Clear incorrect section header
+                headers['row_7'][col_idx] = ''  # Clear incorrect subcategory
+
         # Override the hardcoded fundamental headers from parent
         # Fund Analysis: Columns 0-10 are Company, Accord, Sector, Cap, Market Cap,
-        #                Weights, Factor, Value, Shares, Price, Free Float
+        #                Weights, Factor, Value, Shares, Price, Free Float (NO fundamentals header)
         # Fund Analysis: Columns 11-17 are Fundamentals (Revenue/PAT CAGR/TTM, PR ratios)
         fundamental_start_col = 11
 
@@ -526,9 +534,12 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
     # Add stock data rows (starting from row 9)
     logger.info(f"Populating {len(holdings)} stock rows using block-based structure")
 
+    # Collect stock row data for TOTALS calculation
+    stock_rows_data = []
     for idx, holding in enumerate(holdings, start=1):
         row_data = generator.populate_fund_stock_row(holding, blocks, total_columns)
         # NOTE: No S.No column - removed as per user requirement
+        stock_rows_data.append(row_data)
         ws.append(row_data)
 
     # Add 5 blank rows gap before TOTALS (as per sample file)
@@ -536,18 +547,29 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
         blank_row = [''] * total_columns
         ws.append(blank_row)
 
-    # Add TOTALS row
-    totals_row = ['TOTALS'] + [''] * (total_columns - 1)
-    total_market_cap = sum(h.market_value or 0 for h in holdings if h.market_value)
-    total_holdings_pct = sum(h.holding_percentage or 0 for h in holdings if h.holding_percentage)
+    # Calculate TOTALS row by summing each column across all stock rows
+    totals_row = ['TOTALS'] + ['' for _ in range(total_columns - 1)]
 
-    # Column indices for totals in new structure (no S.No column):
-    # basic_info has 18 columns: Company Name(0), Accord Code(1), Sector(2), Cap(3),
-    #                            Market Cap(4), Weights(5), Factor(6), Value(7), No.of shares(8),
-    #                            Share Price(9), Free Float(10), Fundamentals(11-17)
-    totals_row[4] = total_market_cap  # Column 5: Market Cap
-    totals_row[5] = total_holdings_pct / 100 if total_holdings_pct else 0  # Column 6: Weights
-    totals_row[7] = total_market_cap  # Column 8: Value
+    logger.info("Calculating TOTALS row by summing all numeric columns")
+
+    # Sum columns 4 onwards (skip Company Name, Accord Code, Sector, Cap which are non-numeric)
+    for col_idx in range(4, total_columns):
+        column_sum = 0
+        has_numeric_data = False
+
+        for stock_row in stock_rows_data:
+            value = stock_row[col_idx]
+            # Try to add numeric values
+            if value is not None and value != '':
+                try:
+                    column_sum += float(value)
+                    has_numeric_data = True
+                except (ValueError, TypeError):
+                    pass  # Skip non-numeric values (e.g., text)
+
+        # Set total if column had any numeric data
+        if has_numeric_data:
+            totals_row[col_idx] = column_sum
 
     ws.append(totals_row)
 
@@ -624,7 +646,7 @@ def apply_portfolio_analysis_formatting(ws, total_columns):
                 if col_num == 1:  # Metric label column
                     cell.alignment = Alignment(horizontal='left', vertical='center')
                 else:  # Metric value columns
-                    cell.fill = metric_fill
+                    # No color fill - user requested no colors
                     cell.alignment = data_alignment
 
             # Regular stock data rows
