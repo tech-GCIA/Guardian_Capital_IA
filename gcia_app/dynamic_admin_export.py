@@ -222,20 +222,41 @@ class BlockBasedExportGenerator:
             )
             periods['annual_years'] = annual_years
 
-            # Price dates (shared by share_price, pr_ratio, pe_ratio blocks)
-            price_dates = list(
-                StockPrice.objects.values_list('price_date', flat=True)
+            # Share Price dates - only dates where share_price has value
+            share_price_dates = list(
+                StockPrice.objects.filter(share_price__isnull=False)
+                .values_list('price_date', flat=True)
                 .distinct()
                 .order_by('-price_date')  # Most recent first
             )
-            periods['price_dates'] = [date.strftime('%Y-%m-%d') for date in price_dates]
+            periods['share_price_dates'] = [date.strftime('%Y-%m-%d') for date in share_price_dates]
+
+            # PR dates - only dates where pr_ratio has value
+            pr_dates = list(
+                StockPrice.objects.filter(pr_ratio__isnull=False)
+                .values_list('price_date', flat=True)
+                .distinct()
+                .order_by('-price_date')  # Most recent first
+            )
+            periods['pr_dates'] = [date.strftime('%Y-%m-%d') for date in pr_dates]
+
+            # PE dates - only dates where pe_ratio has value
+            pe_dates = list(
+                StockPrice.objects.filter(pe_ratio__isnull=False)
+                .values_list('price_date', flat=True)
+                .distinct()
+                .order_by('-price_date')  # Most recent first
+            )
+            periods['pe_dates'] = [date.strftime('%Y-%m-%d') for date in pe_dates]
 
             logger.info(f"BLOCK-BASED period collection:")
             logger.info(f"  - Market cap dates: {len(periods['market_cap_dates'])}")
             logger.info(f"  - TTM periods: {len(periods['ttm_periods'])}")
             logger.info(f"  - Quarterly periods: {len(periods['quarterly_periods'])}")
             logger.info(f"  - Annual years: {len(periods['annual_years'])}")
-            logger.info(f"  - Price dates: {len(periods['price_dates'])}")
+            logger.info(f"  - Share Price dates: {len(periods['share_price_dates'])}")
+            logger.info(f"  - PR dates: {len(periods['pr_dates'])}")
+            logger.info(f"  - PE dates: {len(periods['pe_dates'])}")
 
             self.detected_periods = periods
             return periods
@@ -247,7 +268,9 @@ class BlockBasedExportGenerator:
                 'ttm_periods': [],
                 'quarterly_periods': [],
                 'annual_years': [],
-                'price_dates': []
+                'share_price_dates': [],
+                'pr_dates': [],
+                'pe_dates': []
             }
 
     def calculate_block_sizes_and_positions(self, periods):
@@ -293,8 +316,12 @@ class BlockBasedExportGenerator:
                         periods_list = periods['quarterly_periods']
                     elif block_key in ['roce', 'roe', 'retention']:
                         periods_list = periods['annual_years']
-                    elif block_key in ['share_price', 'pr_ratio', 'pe_ratio']:
-                        periods_list = periods['price_dates']
+                    elif block_key == 'share_price':
+                        periods_list = periods['share_price_dates']
+                    elif block_key == 'pr_ratio':
+                        periods_list = periods['pr_dates']
+                    elif block_key == 'pe_ratio':
+                        periods_list = periods['pe_dates']
                     else:
                         periods_list = []
 
@@ -572,6 +599,418 @@ class BlockBasedExportGenerator:
                     row_data[col_pos] = value if value is not None else ''
         except Exception as e:
             logger.error(f"Error populating block data for {field_name}: {str(e)}")
+
+    def get_header_driven_export_structure(self):
+        """
+        NEW: Generate export structure that matches import file format exactly.
+        Creates headers following Row 6, 7, 8 pattern from miniature file.
+
+        Returns:
+            dict: Export structure with dynamically generated headers matching import format
+        """
+        try:
+            logger.info("Generating header-driven export structure...")
+
+            # Step 1: Collect all periods from database (accumulation across uploads)
+            periods = self.collect_all_periods_from_database()
+
+            logger.info(f"Periods collected from database:")
+            logger.info(f"  - Market cap dates: {len(periods['market_cap_dates'])}")
+            logger.info(f"  - TTM periods: {len(periods['ttm_periods'])}")
+            logger.info(f"  - Quarterly periods: {len(periods['quarterly_periods'])}")
+            logger.info(f"  - Annual years: {len(periods['annual_years'])}")
+            logger.info(f"  - Share Price dates: {len(periods['share_price_dates'])}")
+            logger.info(f"  - PR dates: {len(periods['pr_dates'])}")
+            logger.info(f"  - PE dates: {len(periods['pe_dates'])}")
+
+            # Step 2: Define block structure in fixed order
+            blocks = self._define_block_structure(periods)
+
+            # Step 3: Calculate total columns
+            total_columns = self._calculate_total_columns(blocks)
+
+            # Step 4: Generate 8-row headers matching import format
+            headers = self._generate_import_style_headers(blocks, total_columns)
+
+            return {
+                'periods': periods,
+                'blocks': blocks,
+                'total_columns': total_columns,
+                'headers': headers,
+                'method': 'header_driven',
+                'generator_instance': self
+            }
+
+        except Exception as e:
+            logger.error(f"Error generating header-driven export structure: {str(e)}")
+            raise
+
+    def _define_block_structure(self, periods):
+        """
+        Define the block structure that matches the miniature file format.
+
+        Returns:
+            list: Ordered list of blocks with their properties
+        """
+        blocks = [
+            {
+                'name': 'basic_info',
+                'type': 'fixed',
+                'size': 13,
+                'columns': ['S. No.', 'Company Name', 'Accord Code', 'Sector', 'Cap',
+                           'Free Float', '6 Year CAGR', 'TTM', '6 Year CAGR', 'TTM',
+                           'Current', '2 Yr Avg', 'Reval/deval']
+            },
+            {'name': 'sep_1', 'type': 'separator', 'size': 1},
+            {
+                'name': 'market_cap',
+                'type': 'dynamic',
+                'data_type': 'market_cap',
+                'periods': periods['market_cap_dates'],
+                'row6_label': 'Market Cap (in crores)',
+                'row7_label': 'Market Cap (in crores)'
+            },
+            {'name': 'sep_2', 'type': 'separator', 'size': 1},
+            {
+                'name': 'market_cap_ff',
+                'type': 'dynamic',
+                'data_type': 'market_cap_free_float',
+                'periods': periods['market_cap_dates'],
+                'row6_label': 'Market Cap- Free Float  (in crores)',
+                'row7_label': 'Market Cap- Free Float  (in crores)'
+            },
+            {'name': 'sep_3', 'type': 'separator', 'size': 1},
+            {
+                'name': 'ttm_revenue',
+                'type': 'dynamic',
+                'data_type': 'ttm_revenue',
+                'periods': periods['ttm_periods'],
+                'row6_label': 'TTM Revenue',
+                'row7_label': 'TTM Revenue'
+            },
+            {'name': 'sep_4', 'type': 'separator', 'size': 1},
+            {
+                'name': 'ttm_revenue_ff',
+                'type': 'dynamic',
+                'data_type': 'ttm_revenue_free_float',
+                'periods': periods['ttm_periods'],
+                'row6_label': 'TTM Revenue- Free Float',
+                'row7_label': 'TTM Revenue- Free Float'
+            },
+            {'name': 'sep_5', 'type': 'separator', 'size': 1},
+            {
+                'name': 'ttm_pat',
+                'type': 'dynamic',
+                'data_type': 'ttm_pat',
+                'periods': periods['ttm_periods'],
+                'row6_label': 'TTM PAT',
+                'row7_label': 'TTM PAT'
+            },
+            {'name': 'sep_6', 'type': 'separator', 'size': 1},
+            {
+                'name': 'ttm_pat_ff',
+                'type': 'dynamic',
+                'data_type': 'ttm_pat_free_float',
+                'periods': periods['ttm_periods'],
+                'row6_label': 'TTM PAT- Free Float',
+                'row7_label': 'TTM PAT- Free Float'
+            },
+            {'name': 'sep_7', 'type': 'separator', 'size': 1},
+            {
+                'name': 'quarterly_revenue',
+                'type': 'dynamic',
+                'data_type': 'quarterly_revenue',
+                'periods': periods['quarterly_periods'],
+                'row6_label': 'Quarterly- Revenue',
+                'row7_label': 'Quarterly- Revenue'
+            },
+            {'name': 'sep_8', 'type': 'separator', 'size': 1},
+            {
+                'name': 'quarterly_revenue_ff',
+                'type': 'dynamic',
+                'data_type': 'quarterly_revenue_free_float',
+                'periods': periods['quarterly_periods'],
+                'row6_label': 'Quarterly- Revenue-  Free Float',
+                'row7_label': 'Quarterly- Revenue-  Free Float'
+            },
+            {'name': 'sep_9', 'type': 'separator', 'size': 1},
+            {
+                'name': 'quarterly_pat',
+                'type': 'dynamic',
+                'data_type': 'quarterly_pat',
+                'periods': periods['quarterly_periods'],
+                'row6_label': 'Quarterly- PAT',
+                'row7_label': 'Quarterly- PAT'
+            },
+            {'name': 'sep_10', 'type': 'separator', 'size': 1},
+            {
+                'name': 'quarterly_pat_ff',
+                'type': 'dynamic',
+                'data_type': 'quarterly_pat_free_float',
+                'periods': periods['quarterly_periods'],
+                'row6_label': 'Quarterly-PAT-  Free Float',
+                'row7_label': 'Quarterly-PAT-  Free Float'
+            },
+            {'name': 'sep_11', 'type': 'separator', 'size': 1},
+            {
+                'name': 'roce',
+                'type': 'dynamic',
+                'data_type': 'roce',
+                'periods': periods['annual_years'],
+                'row6_label': 'ROCE (%)',
+                'row7_label': 'ROCE (%)'
+            },
+            {'name': 'sep_12', 'type': 'separator', 'size': 1},
+            {
+                'name': 'roe',
+                'type': 'dynamic',
+                'data_type': 'roe',
+                'periods': periods['annual_years'],
+                'row6_label': 'ROE (%)',
+                'row7_label': 'ROE (%)'
+            },
+            {'name': 'sep_13', 'type': 'separator', 'size': 1},
+            {
+                'name': 'retention',
+                'type': 'dynamic',
+                'data_type': 'retention',
+                'periods': periods['annual_years'],
+                'row6_label': 'Retention (%)',
+                'row7_label': 'Retention (%)'
+            },
+            {'name': 'sep_14', 'type': 'separator', 'size': 1},
+            {
+                'name': 'share_price',
+                'type': 'dynamic',
+                'data_type': 'share_price',
+                'periods': periods['share_price_dates'],
+                'row6_label': 'Share Price',
+                'row7_label': 'Share Price'
+            },
+            {'name': 'sep_15', 'type': 'separator', 'size': 1},
+            {
+                'name': 'pr_ratio',
+                'type': 'dynamic',
+                'data_type': 'pr_ratio',
+                'periods': periods['pr_dates'],
+                'row6_label': 'PR',
+                'row7_label': 'PR'
+            },
+            {'name': 'sep_16', 'type': 'separator', 'size': 1},
+            {
+                'name': 'pe_ratio',
+                'type': 'dynamic',
+                'data_type': 'pe_ratio',
+                'periods': periods['pe_dates'],
+                'row6_label': 'PE',
+                'row7_label': 'PE'
+            },
+            {'name': 'sep_17', 'type': 'separator', 'size': 1},
+            {
+                'name': 'identifiers',
+                'type': 'fixed',
+                'size': 3,
+                'columns': ['BSE Code', 'NSE Code', 'ISIN']
+            }
+        ]
+
+        return blocks
+
+    def _calculate_total_columns(self, blocks):
+        """Calculate total column count from blocks"""
+        total = 0
+        for block in blocks:
+            if block['type'] == 'fixed' or block['type'] == 'separator':
+                total += block['size']
+            elif block['type'] == 'dynamic':
+                total += len(block['periods'])
+        return total
+
+    def _generate_import_style_headers(self, blocks, total_columns):
+        """
+        Generate 8-row headers matching the miniature import file format.
+        Row 6 = Category, Row 7 = Subcategory, Row 8 = Period/Column name
+        """
+        # Initialize all 8 header rows
+        headers = {f'row_{i}': [''] * total_columns for i in range(1, 9)}
+
+        # Row 2: Column numbers
+        for i in range(1, total_columns):
+            headers['row_2'][i] = i
+
+        # Fill Row 6, 7, 8 based on blocks
+        current_col = 0
+
+        for block in blocks:
+            if block['type'] == 'separator':
+                # Empty column
+                current_col += 1
+
+            elif block['type'] == 'fixed':
+                # Basic info or identifiers
+                for i, col_name in enumerate(block['columns']):
+                    if current_col + i < total_columns:
+                        headers['row_8'][current_col + i] = col_name
+                current_col += block['size']
+
+            elif block['type'] == 'dynamic':
+                # Data columns with periods
+                row6_label = block['row6_label']
+                row7_label = block['row7_label']
+                periods = block['periods']
+
+                for i, period in enumerate(periods):
+                    if current_col + i < total_columns:
+                        headers['row_6'][current_col + i] = row6_label
+                        headers['row_7'][current_col + i] = row7_label
+                        headers['row_8'][current_col + i] = period
+
+                current_col += len(periods)
+
+        # Add Stock Fundamentals section headers for columns 7-13
+        # Row 6: Section header spanning columns 7-13
+        fundamentals_section = "Stock wise Fundamentals and Valuations"
+        for col_idx in range(6, 13):
+            if col_idx < total_columns:
+                headers['row_6'][col_idx] = fundamentals_section
+
+        # Row 7: Subcategory labels (without quarter info)
+        if total_columns > 6:
+            headers['row_7'][6] = "Revenue"   # 6 Year CAGR
+        if total_columns > 7:
+            headers['row_7'][7] = "Revenue"   # TTM
+        if total_columns > 8:
+            headers['row_7'][8] = "PAT"       # 6 Year CAGR
+        if total_columns > 9:
+            headers['row_7'][9] = "PAT"       # TTM
+        if total_columns > 10:
+            headers['row_7'][10] = "PR"       # Current
+        if total_columns > 11:
+            headers['row_7'][11] = "PR"       # 2 Yr Avg
+        if total_columns > 12:
+            headers['row_7'][12] = "PR"       # Reval/Deval
+
+        return headers
+
+    def populate_stock_row_header_driven(self, stock, blocks, total_columns):
+        """
+        Populate stock data row using header-driven block structure.
+        Matches the import process logic.
+        """
+        row_data = [''] * total_columns
+        current_col = 0
+
+        for block in blocks:
+            if block['type'] == 'separator':
+                row_data[current_col] = ''
+                current_col += 1
+
+            elif block['name'] == 'basic_info':
+                # Fill basic info
+                row_data[current_col + 0] = ''  # S.No - filled later
+                row_data[current_col + 1] = stock.company_name or ''
+                row_data[current_col + 2] = stock.accord_code or ''
+                row_data[current_col + 3] = stock.sector or ''
+                row_data[current_col + 4] = stock.cap or ''
+                row_data[current_col + 5] = stock.free_float if stock.free_float else ''
+                row_data[current_col + 6] = stock.revenue_6yr_cagr if stock.revenue_6yr_cagr else ''
+                row_data[current_col + 7] = stock.revenue_ttm if stock.revenue_ttm else ''
+                row_data[current_col + 8] = stock.pat_6yr_cagr if stock.pat_6yr_cagr else ''
+                row_data[current_col + 9] = stock.pat_ttm if stock.pat_ttm else ''
+                row_data[current_col + 10] = stock.current_value if stock.current_value else ''
+                row_data[current_col + 11] = stock.two_yr_avg if stock.two_yr_avg else ''
+                row_data[current_col + 12] = stock.reval_deval if stock.reval_deval else ''
+                current_col += 13
+
+            elif block['name'] == 'identifiers':
+                row_data[current_col + 0] = stock.bse_code or ''
+                row_data[current_col + 1] = stock.nse_symbol or ''
+                row_data[current_col + 2] = stock.isin or ''
+                current_col += 3
+
+            elif block['type'] == 'dynamic':
+                # Fill time-series data
+                data_type = block['data_type']
+                periods = block['periods']
+
+                for period in periods:
+                    value = self._get_stock_value_for_period(stock, data_type, period)
+                    row_data[current_col] = value if value is not None else ''
+                    current_col += 1
+
+        return row_data
+
+    def _get_stock_value_for_period(self, stock, data_type, period):
+        """Get stock value for specific data type and period"""
+        try:
+            if data_type == 'market_cap':
+                record = stock.market_cap_data.filter(date=period).first()
+                return record.market_cap if record else None
+
+            elif data_type == 'market_cap_free_float':
+                record = stock.market_cap_data.filter(date=period).first()
+                return record.market_cap_free_float if record else None
+
+            elif data_type == 'ttm_revenue':
+                record = stock.ttm_data.filter(period=period).first()
+                return record.ttm_revenue if record else None
+
+            elif data_type == 'ttm_revenue_free_float':
+                record = stock.ttm_data.filter(period=period).first()
+                return record.ttm_revenue_free_float if record else None
+
+            elif data_type == 'ttm_pat':
+                record = stock.ttm_data.filter(period=period).first()
+                return record.ttm_pat if record else None
+
+            elif data_type == 'ttm_pat_free_float':
+                record = stock.ttm_data.filter(period=period).first()
+                return record.ttm_pat_free_float if record else None
+
+            elif data_type == 'quarterly_revenue':
+                record = stock.quarterly_data.filter(period=period).first()
+                return record.quarterly_revenue if record else None
+
+            elif data_type == 'quarterly_revenue_free_float':
+                record = stock.quarterly_data.filter(period=period).first()
+                return record.quarterly_revenue_free_float if record else None
+
+            elif data_type == 'quarterly_pat':
+                record = stock.quarterly_data.filter(period=period).first()
+                return record.quarterly_pat if record else None
+
+            elif data_type == 'quarterly_pat_free_float':
+                record = stock.quarterly_data.filter(period=period).first()
+                return record.quarterly_pat_free_float if record else None
+
+            elif data_type == 'roce':
+                record = stock.annual_ratios.filter(financial_year=period).first()
+                return record.roce_percentage if record else None
+
+            elif data_type == 'roe':
+                record = stock.annual_ratios.filter(financial_year=period).first()
+                return record.roe_percentage if record else None
+
+            elif data_type == 'retention':
+                record = stock.annual_ratios.filter(financial_year=period).first()
+                return record.retention_percentage if record else None
+
+            elif data_type == 'share_price':
+                record = stock.price_data.filter(price_date=period).first()
+                return record.share_price if record else None
+
+            elif data_type == 'pr_ratio':
+                record = stock.price_data.filter(price_date=period).first()
+                return record.pr_ratio if record else None
+
+            elif data_type == 'pe_ratio':
+                record = stock.price_data.filter(price_date=period).first()
+                return record.pe_ratio if record else None
+
+        except Exception as e:
+            logger.error(f"Error getting value for {data_type}, period {period}: {e}")
+
+        return None
 
     def get_complete_block_based_export_structure(self):
         """

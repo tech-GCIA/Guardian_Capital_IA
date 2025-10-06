@@ -4,7 +4,7 @@ from gcia_app.views import (
     signup_view, login_view, home_view, logout_view, process_amcfs_nav_and_returns,
     process_portfolio_valuation, process_financial_planning, fund_analysis_metrics_view,
     download_fund_metrics, trigger_metrics_calculation, get_calculation_progress,
-    cancel_metrics_calculation
+    cancel_metrics_calculation, get_upload_progress
 )
 
 urlpatterns = [
@@ -23,4 +23,7 @@ urlpatterns = [
     path('trigger_metrics_calculation/', trigger_metrics_calculation, name='trigger_metrics_calculation'),
     path('calculation_progress/<str:session_id>/', get_calculation_progress, name='calculation_progress'),
     path('cancel_calculation/<str:session_id>/', cancel_metrics_calculation, name='cancel_calculation'),
+
+    # Stock Data Upload Progress URLs
+    path('upload_progress/<str:session_id>/', get_upload_progress, name='upload_progress'),
 ]

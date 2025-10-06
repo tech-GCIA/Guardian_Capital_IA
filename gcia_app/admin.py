@@ -88,7 +88,7 @@ class StockAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
     actions = ['export_stocks_base_sheet', 'export_all_stocks_base_sheet']
 
     def export_stocks_base_sheet(self, request, queryset):
-        """Export selected stocks data in Base Sheet format with DYNAMIC periods"""
+        """Export selected stocks data in Base Sheet format matching IMPORT format"""
         from openpyxl import Workbook
         from openpyxl.styles import Font, Alignment
         from django.utils import timezone
@@ -96,7 +96,7 @@ class StockAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
         from io import BytesIO
         from django.http import HttpResponse
 
-        # Import the block-based export generator
+        # Import the header-driven export generator
         from .dynamic_admin_export import BlockBasedExportGenerator
 
         # Create workbook
@@ -104,44 +104,42 @@ class StockAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
         ws = wb.active
         ws.title = "Stocks Base Sheet"
 
-        # Generate BLOCK-BASED export structure for scalable period handling
-        block_generator = BlockBasedExportGenerator()
-        export_structure = block_generator.get_complete_block_based_export_structure()
+        # Generate HEADER-DRIVEN export structure (matches import format)
+        generator = BlockBasedExportGenerator()
+        export_structure = generator.get_header_driven_export_structure()
 
-        header_structure = export_structure['header_structure']
-        block_mapping = export_structure['block_mapping']
+        headers = export_structure['headers']
+        blocks = export_structure['blocks']
         periods = export_structure['periods']
         total_columns = export_structure['total_columns']
-        generator_instance = export_structure['generator_instance']
 
-        print(f"=== BLOCK-BASED ADMIN EXPORT (Scalable Template System) ===")
-        print(f"Total columns: {total_columns} (block-based calculation)")
+        print(f"=== HEADER-DRIVEN ADMIN EXPORT (Matching Import Format) ===")
+        print(f"Total columns: {total_columns}")
         print(f"Market cap dates: {len(periods['market_cap_dates'])}")
         print(f"TTM periods: {len(periods['ttm_periods'])}")
         print(f"Quarterly periods: {len(periods['quarterly_periods'])}")
         print(f"Annual years: {len(periods['annual_years'])}")
-        print(f"Price dates: {len(periods['price_dates'])}")
-        print(f"Total blocks: {len(block_mapping)}")
+        print(f"Share Price dates: {len(periods['share_price_dates'])}")
+        print(f"PR dates: {len(periods['pr_dates'])}")
+        print(f"PE dates: {len(periods['pe_dates'])}")
 
-        # Add all 8 header rows with DYNAMIC structure
-        ws.append(header_structure['row_1'])  # Row 1: Empty
-        ws.append(header_structure['row_2'])  # Row 2: Column numbers
-        ws.append(header_structure['row_3'])  # Row 3: Field descriptions
-        ws.append(header_structure['row_4'])  # Row 4: Shareholding info
-        ws.append(header_structure['row_5'])  # Row 5: Formulas
-        ws.append(header_structure['row_6'])  # Row 6: Category descriptions
-        ws.append(header_structure['row_7'])  # Row 7: Sub-category details
-        ws.append(header_structure['row_8'])  # Row 8: DYNAMIC column headers with actual periods
+        # Add all 8 header rows matching import format
+        ws.append(headers['row_1'])  # Row 1: Empty
+        ws.append(headers['row_2'])  # Row 2: Column numbers
+        ws.append(headers['row_3'])  # Row 3: Empty
+        ws.append(headers['row_4'])  # Row 4: Empty
+        ws.append(headers['row_5'])  # Row 5: Empty
+        ws.append(headers['row_6'])  # Row 6: Category labels
+        ws.append(headers['row_7'])  # Row 7: Subcategory labels
+        ws.append(headers['row_8'])  # Row 8: Period values/column names
 
-        # Add stock data using BLOCK-BASED POSITIONING
+        # Add stock data using header-driven structure
         for i, stock in enumerate(queryset, 1):
-            # Get organized stock data by blocks
-            stock_data = generator_instance.get_stock_data_by_blocks(stock, block_mapping)
+            # Populate row using header-driven positioning
+            row_data = generator.populate_stock_row_header_driven(stock, blocks, total_columns)
 
-            # Populate row using block-based positioning (scalable approach)
-            row_data = generator_instance.populate_stock_row_by_blocks(
-                stock, stock_data, block_mapping, i
-            )
+            # Set S.No
+            row_data[0] = i
 
             ws.append(row_data)
 
@@ -156,9 +154,9 @@ class StockAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
             excel_content,
             content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
         )
-        response['Content-Disposition'] = f'attachment; filename="stocks_base_sheet_block_based_{timezone.now().strftime("%Y%m%d_%H%M%S")}.xlsx"'
+        response['Content-Disposition'] = f'attachment; filename="stocks_base_sheet_header_driven_{timezone.now().strftime("%Y%m%d_%H%M%S")}.xlsx"'
 
-        self.message_user(request, f"Successfully exported {len(queryset)} stocks using BLOCK-BASED scalable system to Excel file.")
+        self.message_user(request, f"Successfully exported {len(queryset)} stocks matching import format.")
         return response
 
     def export_all_stocks_base_sheet(self, request, queryset):

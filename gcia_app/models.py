@@ -430,3 +430,36 @@ class FileStructureMetadata(models.Model):
 
 	def __str__(self):
 		return f"{self.original_filename} - {self.upload_session_id} ({self.import_status})"
+
+class UploadProgressSession(models.Model):
+	"""
+	Tracks progress of stock data upload sessions for real-time updates
+	"""
+	session_id = models.CharField(max_length=255, unique=True, primary_key=True, verbose_name='Session ID')
+	user = models.ForeignKey(Customer, on_delete=models.CASCADE, related_name='upload_sessions', null=True, blank=True)
+	filename = models.CharField(max_length=500, verbose_name='Filename')
+	file_type = models.CharField(max_length=50, verbose_name='File Type')
+
+	total_rows = models.IntegerField(default=0, verbose_name='Total Rows')
+	processed_rows = models.IntegerField(default=0, verbose_name='Processed Rows')
+	current_stock_name = models.CharField(max_length=500, blank=True, verbose_name='Current Stock')
+
+	status = models.CharField(max_length=50, default='started', verbose_name='Status')  # 'started', 'processing', 'completed', 'failed'
+	progress_percentage = models.FloatField(default=0.0, verbose_name='Progress %')
+
+	# Statistics
+	stocks_created = models.IntegerField(default=0, verbose_name='Stocks Created')
+	stocks_updated = models.IntegerField(default=0, verbose_name='Stocks Updated')
+	records_created = models.IntegerField(default=0, verbose_name='Total Records Created')
+
+	error_message = models.TextField(blank=True, null=True, verbose_name='Error Message')
+	started_at = models.DateTimeField(auto_now_add=True)
+	completed_at = models.DateTimeField(null=True, blank=True)
+
+	class Meta:
+		verbose_name = "Upload Progress Session"
+		verbose_name_plural = "Upload Progress Sessions"
+		ordering = ['-started_at']
+
+	def __str__(self):
+		return f"{self.filename} - {self.status} ({self.progress_percentage:.1f}%)"

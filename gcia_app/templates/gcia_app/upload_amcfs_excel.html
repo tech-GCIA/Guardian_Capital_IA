@@ -24,12 +24,50 @@
         border-radius: 10px;
         text-align: center;
         box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-        max-width: 400px;
+        max-width: 500px;
+        min-width: 400px;
     }
 
     .loading-content .spinner-border {
         width: 3rem;
         height: 3rem;
+    }
+
+    /* Progress Bar Styles */
+    .progress-container {
+        margin-top: 20px;
+    }
+
+    .progress {
+        height: 25px;
+        background-color: #e9ecef;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+
+    .progress-bar {
+        background-color: #007bff;
+        color: white;
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        transition: width 0.3s ease;
+    }
+
+    .progress-details {
+        margin-top: 15px;
+        font-size: 14px;
+        color: #495057;
+    }
+
+    .progress-details p {
+        margin: 5px 0;
+    }
+
+    .stock-name {
+        font-weight: 600;
+        color: #007bff;
     }
 
     /* Form Enhancements */
@@ -75,11 +113,23 @@
     <!-- Loading Overlay -->
     <div id="loading-overlay" style="display: none;">
         <div class="loading-content">
-            <div class="spinner-border text-primary" role="status">
+            <div id="upload-spinner" class="spinner-border text-primary" role="status">
                 <span class="visually-hidden">Loading...</span>
             </div>
-            <h5 class="mt-3">Processing your file...</h5>
-            <p class="text-muted">Please wait while we process your data. This may take a few minutes.</p>
+            <h5 class="mt-3" id="upload-title">Processing your file...</h5>
+            <p class="text-muted" id="upload-message">Please wait while we process your data. This may take a few minutes.</p>
+
+            <!-- Progress Bar (hidden initially) -->
+            <div id="progress-container" class="progress-container" style="display: none;">
+                <div class="progress">
+                    <div id="progress-bar" class="progress-bar" role="progressbar" style="width: 0%">0%</div>
+                </div>
+                <div class="progress-details">
+                    <p><strong>Progress:</strong> <span id="progress-text">0 / 0 stocks</span></p>
+                    <p><strong>Current Stock:</strong> <span id="current-stock" class="stock-name">-</span></p>
+                    <p><strong>Created:</strong> <span id="stocks-created">0</span> | <strong>Updated:</strong> <span id="stocks-updated">0</span></p>
+                </div>
+            </div>
         </div>
     </div>
 
@@ -134,7 +184,6 @@
             const uploadFormCard = document.getElementById('upload-form-card');
 
             uploadForm.addEventListener('submit', function(e) {
-                // Get form data
                 const fileInput = document.querySelector('input[type="file"]');
                 const fileTypeSelect = document.querySelector('select[name="file_type"]');
 
@@ -151,25 +200,116 @@
                     return;
                 }
 
-                // Show loading state
-                btnText.textContent = 'Processing...';
-                btnSpinner.style.display = 'inline-block';
-                uploadBtn.disabled = true;
-
-                // Show loading overlay after a short delay
-                setTimeout(function() {
-                    loadingOverlay.style.display = 'flex';
-                    uploadFormCard.style.opacity = '0.5';
-                }, 500);
-
-                // Update loading message based on file type
-                const loadingMessage = document.querySelector('.loading-content p');
+                // For stocks_base_sheet, use AJAX with progress tracking
                 if (fileTypeSelect.value === 'stocks_base_sheet') {
-                    loadingMessage.textContent = 'Processing stock data... This may take a few minutes depending on file size.';
+                    e.preventDefault();
+                    uploadWithProgress(fileInput.files[0], fileTypeSelect.value);
                 } else {
-                    loadingMessage.textContent = 'Processing your file... Please wait.';
+                    // For other file types, use normal form submission
+                    btnText.textContent = 'Processing...';
+                    btnSpinner.style.display = 'inline-block';
+                    uploadBtn.disabled = true;
+
+                    setTimeout(function() {
+                        loadingOverlay.style.display = 'flex';
+                        uploadFormCard.style.opacity = '0.5';
+                    }, 500);
                 }
             });
+
+            // AJAX upload with progress tracking
+            function uploadWithProgress(file, fileType) {
+                // Generate unique session ID
+                const sessionId = 'upload_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+
+                // Show loading state
+                btnText.textContent = 'Uploading...';
+                btnSpinner.style.display = 'inline-block';
+                uploadBtn.disabled = true;
+                loadingOverlay.style.display = 'flex';
+                uploadFormCard.style.opacity = '0.5';
+
+                // Prepare form data
+                const formData = new FormData();
+                formData.append('excel_file', file);
+                formData.append('file_type', fileType);
+                formData.append('session_id', sessionId);
+                formData.append('csrfmiddlewaretoken', document.querySelector('[name=csrfmiddlewaretoken]').value);
+
+                // Upload file
+                fetch('{% url "process_amcfs_nav_and_returns" %}', {
+                    method: 'POST',
+                    body: formData
+                }).then(response => {
+                    if (!response.ok) throw new Error('Upload failed');
+
+                    // Start polling for progress
+                    document.getElementById('upload-title').textContent = 'Processing Stock Data...';
+                    document.getElementById('upload-message').textContent = 'Please wait while we import your stock data.';
+                    document.getElementById('upload-spinner').style.display = 'none';
+                    document.getElementById('progress-container').style.display = 'block';
+
+                    pollProgress(sessionId);
+
+                    return response.text();
+                }).catch(error => {
+                    console.error('Upload error:', error);
+                    alert('Upload failed: ' + error.message);
+                    resetForm();
+                });
+            }
+
+            // Poll for upload progress
+            let progressInterval;
+            function pollProgress(sessionId) {
+                progressInterval = setInterval(function() {
+                    fetch(`/app/upload_progress/${sessionId}/`)
+                        .then(response => response.json())
+                        .then(data => {
+                            if (data.error) {
+                                console.error('Progress error:', data.error);
+                                return;
+                            }
+
+                            // Update progress bar
+                            const percentage = Math.round(data.progress_percentage);
+                            document.getElementById('progress-bar').style.width = percentage + '%';
+                            document.getElementById('progress-bar').textContent = percentage + '%';
+
+                            // Update progress details
+                            document.getElementById('progress-text').textContent =
+                                `${data.processed_rows} / ${data.total_rows} stocks`;
+                            document.getElementById('current-stock').textContent =
+                                data.current_stock_name || '-';
+                            document.getElementById('stocks-created').textContent = data.stocks_created || 0;
+                            document.getElementById('stocks-updated').textContent = data.stocks_updated || 0;
+
+                            // Check if completed
+                            if (data.status === 'completed') {
+                                clearInterval(progressInterval);
+                                setTimeout(function() {
+                                    window.location.reload();
+                                }, 1500);
+                            } else if (data.status === 'failed') {
+                                clearInterval(progressInterval);
+                                alert('Upload failed: ' + (data.error_message || 'Unknown error'));
+                                resetForm();
+                            }
+                        })
+                        .catch(error => {
+                            console.error('Progress polling error:', error);
+                        });
+                }, 1000); // Poll every 1 second
+            }
+
+            function resetForm() {
+                btnText.textContent = 'Upload and Process';
+                btnSpinner.style.display = 'none';
+                uploadBtn.disabled = false;
+                loadingOverlay.style.display = 'none';
+                uploadFormCard.style.opacity = '1';
+                if (progressInterval) clearInterval(progressInterval);
+            }
 
             // File type change handler
             const fileTypeSelect = document.querySelector('select[name="file_type"]');

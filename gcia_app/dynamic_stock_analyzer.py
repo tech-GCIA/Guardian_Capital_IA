@@ -31,6 +31,188 @@ class DynamicStockSheetAnalyzer:
         self.data_categories = {}
         self.header_structure = {}
 
+    def analyze_excel_structure_header_driven(self, excel_file) -> Dict[str, Any]:
+        """
+        NEW: Header-driven analysis that reads Rows 6, 7, and 8 together
+        to create a complete column-by-column mapping.
+
+        This method replaces the complex detection logic with simple header reading.
+
+        Args:
+            excel_file: Excel file object or path
+
+        Returns:
+            dict: Complete column mapping with data types identified from headers
+        """
+        try:
+            # Read all 8 header rows
+            headers_df = pd.read_excel(excel_file, nrows=8, header=None)
+
+            logger.info(f"Analyzing Excel structure (header-driven): {headers_df.shape[1]} columns detected")
+
+            # Extract the 3 important header rows
+            row_6 = headers_df.iloc[5]  # Category labels (e.g., "Market Cap (in crores)")
+            row_7 = headers_df.iloc[6]  # Subcategory labels
+            row_8 = headers_df.iloc[7]  # Period values or column names
+
+            # Build complete column-by-column mapping
+            complete_column_mapping = {}
+
+            for col_idx in range(len(row_8)):
+                category = str(row_6[col_idx]).strip() if pd.notna(row_6[col_idx]) else ''
+                subcategory = str(row_7[col_idx]).strip() if pd.notna(row_7[col_idx]) else ''
+                period = row_8[col_idx]
+
+                # Identify data type from category label
+                data_type = self._identify_data_type_from_headers(category, subcategory, period, col_idx)
+
+                complete_column_mapping[col_idx] = {
+                    'column_index': col_idx,
+                    'category': category,
+                    'subcategory': subcategory,
+                    'period': period,
+                    'data_type': data_type,
+                    'is_separator': self._is_separator_column(category, subcategory, period)
+                }
+
+            # Store header rows for later use
+            header_structure = {
+                'row_1': headers_df.iloc[0].tolist(),
+                'row_2': headers_df.iloc[1].tolist(),
+                'row_3': headers_df.iloc[2].tolist(),
+                'row_4': headers_df.iloc[3].tolist(),
+                'row_5': headers_df.iloc[4].tolist(),
+                'row_6': row_6.tolist(),
+                'row_7': row_7.tolist(),
+                'row_8': row_8.tolist(),
+            }
+
+            analysis_results = {
+                'total_columns': headers_df.shape[1],
+                'complete_column_mapping': complete_column_mapping,
+                'header_structure': header_structure,
+                'method': 'header_driven'
+            }
+
+            logger.info(f"Header-driven analysis completed: {len(complete_column_mapping)} columns mapped")
+            return analysis_results
+
+        except Exception as e:
+            logger.error(f"Error in header-driven analysis: {str(e)}")
+            raise
+
+    def _identify_data_type_from_headers(self, category: str, subcategory: str, period, col_idx: int) -> str:
+        """
+        Identify the data type of a column based on its header information.
+
+        Args:
+            category: Row 6 category label
+            subcategory: Row 7 subcategory label
+            period: Row 8 period value
+            col_idx: Column index
+
+        Returns:
+            str: Data type identifier
+        """
+        # Convert to lowercase for comparison
+        cat_lower = category.lower()
+        subcat_lower = subcategory.lower()
+
+        # Handle basic info columns (first ~13 columns, no category label)
+        if col_idx < 14 and (not category or category == 'nan'):
+            return 'basic_info'
+
+        # Market Cap
+        if 'market cap' in cat_lower:
+            if 'free float' in cat_lower:
+                return 'market_cap_free_float'
+            else:
+                return 'market_cap'
+
+        # TTM Data
+        if 'ttm' in cat_lower:
+            if 'revenue' in cat_lower or 'net sales' in cat_lower:
+                if 'free float' in cat_lower:
+                    return 'ttm_revenue_free_float'
+                else:
+                    return 'ttm_revenue'
+            elif 'pat' in cat_lower or 'profit after tax' in cat_lower:
+                if 'free float' in cat_lower:
+                    return 'ttm_pat_free_float'
+                else:
+                    return 'ttm_pat'
+
+        # Quarterly Data
+        if 'quarterly' in cat_lower:
+            if 'revenue' in cat_lower or 'net sales' in cat_lower:
+                if 'free float' in cat_lower:
+                    return 'quarterly_revenue_free_float'
+                else:
+                    return 'quarterly_revenue'
+            elif 'pat' in cat_lower or 'profit after tax' in cat_lower:
+                if 'free float' in cat_lower:
+                    return 'quarterly_pat_free_float'
+                else:
+                    return 'quarterly_pat'
+
+        # Annual Ratios
+        if 'roce' in cat_lower:
+            return 'roce'
+        if 'roe' in cat_lower:
+            return 'roe'
+        if 'retention' in cat_lower or 'dividend' in cat_lower:
+            return 'retention'
+
+        # Price Data
+        if 'share price' in cat_lower:
+            return 'share_price'
+
+        # PR ratio - flexible matching (standalone "PR" or "P/R")
+        if 'price to revenue' in cat_lower:
+            return 'pr_ratio'
+        elif cat_lower.strip() == 'pr' or cat_lower.strip() == 'p/r':
+            return 'pr_ratio'
+        elif 'pr' in cat_lower and 'ratio' in cat_lower:
+            return 'pr_ratio'
+
+        # PE ratio - flexible matching (standalone "PE" or "P/E")
+        if 'price to earnings' in cat_lower:
+            return 'pe_ratio'
+        elif cat_lower.strip() == 'pe' or cat_lower.strip() == 'p/e':
+            return 'pe_ratio'
+        elif 'pe' in cat_lower and 'ratio' in cat_lower:
+            return 'pe_ratio'
+
+        # Identifiers (last columns)
+        if 'bse code' in cat_lower or 'bse' in str(period).lower():
+            return 'bse_code'
+        if 'nse' in cat_lower or 'nse' in str(period).lower():
+            return 'nse_symbol'
+        if 'isin' in cat_lower or 'isin' in str(period).lower():
+            return 'isin'
+
+        # Unknown or separator
+        return 'unknown'
+
+    def _is_separator_column(self, category: str, subcategory: str, period) -> bool:
+        """
+        Determine if a column is a separator (empty column).
+
+        Args:
+            category: Row 6 value
+            subcategory: Row 7 value
+            period: Row 8 value
+
+        Returns:
+            bool: True if this is a separator column
+        """
+        # Check if all header values are empty/null
+        is_cat_empty = pd.isna(category) or category == '' or category == 'nan'
+        is_subcat_empty = pd.isna(subcategory) or subcategory == '' or subcategory == 'nan'
+        is_period_empty = pd.isna(period) or period == '' or str(period) == 'nan'
+
+        return is_cat_empty and is_subcat_empty and is_period_empty
+
     def analyze_excel_structure(self, excel_file) -> Dict[str, Any]:
         """
         Main analysis method that parses the Excel file structure and returns comprehensive mapping.
