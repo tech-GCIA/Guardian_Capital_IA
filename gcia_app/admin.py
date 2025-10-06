@@ -106,6 +106,12 @@ class StockAdmin(ImportExportModelAdmin, ReadOnlyModelAdmin):
 
         # Generate HEADER-DRIVEN export structure (matches import format)
         generator = BlockBasedExportGenerator()
+
+        # PERFORMANCE: Preload ALL data for selected stocks into memory cache
+        print(f"Preloading data for {len(queryset)} stocks...")
+        generator.preload_all_stock_data(queryset)
+        print(f"Data preloading complete!")
+
         export_structure = generator.get_header_driven_export_structure()
 
         headers = export_structure['headers']

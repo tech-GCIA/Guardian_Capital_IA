@@ -600,6 +600,102 @@ class BlockBasedExportGenerator:
         except Exception as e:
             logger.error(f"Error populating block data for {field_name}: {str(e)}")
 
+    def preload_all_stock_data(self, stocks):
+        """
+        Preload ALL stock data into dictionaries for fast O(1) lookup.
+        Eliminates N+1 query problem by loading everything upfront.
+
+        Args:
+            stocks: Queryset of stocks to preload data for
+
+        Returns:
+            dict: Dictionaries for each data type keyed by (stock_id, period)
+        """
+        from collections import defaultdict
+
+        stock_ids = list(stocks.values_list('stock_id', flat=True))
+
+        # Initialize dictionaries
+        data_cache = {
+            'market_cap': {},           # {(stock_id, date): {'market_cap': value, 'market_cap_free_float': value}}
+            'ttm': {},                  # {(stock_id, period): {'ttm_revenue': value, ...}}
+            'quarterly': {},            # {(stock_id, period): {'quarterly_revenue': value, ...}}
+            'annual': {},               # {(stock_id, year): {'roce_percentage': value, ...}}
+            'price': {},                # {(stock_id, date): {'share_price': value, 'pr_ratio': value, 'pe_ratio': value}}
+        }
+
+        # Bulk load market cap data
+        from .models import StockMarketCap
+        market_caps = StockMarketCap.objects.filter(stock_id__in=stock_ids).values(
+            'stock_id', 'date', 'market_cap', 'market_cap_free_float'
+        )
+        for mc in market_caps:
+            key = (mc['stock_id'], mc['date'].strftime('%Y-%m-%d'))
+            data_cache['market_cap'][key] = {
+                'market_cap': mc['market_cap'],
+                'market_cap_free_float': mc['market_cap_free_float']
+            }
+
+        # Bulk load TTM data
+        from .models import StockTTMData
+        ttm_data = StockTTMData.objects.filter(stock_id__in=stock_ids).values(
+            'stock_id', 'period', 'ttm_revenue', 'ttm_revenue_free_float',
+            'ttm_pat', 'ttm_pat_free_float'
+        )
+        for ttm in ttm_data:
+            key = (ttm['stock_id'], ttm['period'])
+            data_cache['ttm'][key] = {
+                'ttm_revenue': ttm['ttm_revenue'],
+                'ttm_revenue_free_float': ttm['ttm_revenue_free_float'],
+                'ttm_pat': ttm['ttm_pat'],
+                'ttm_pat_free_float': ttm['ttm_pat_free_float']
+            }
+
+        # Bulk load quarterly data
+        from .models import StockQuarterlyData
+        quarterly_data = StockQuarterlyData.objects.filter(stock_id__in=stock_ids).values(
+            'stock_id', 'period', 'quarterly_revenue', 'quarterly_revenue_free_float',
+            'quarterly_pat', 'quarterly_pat_free_float'
+        )
+        for q in quarterly_data:
+            key = (q['stock_id'], q['period'])
+            data_cache['quarterly'][key] = {
+                'quarterly_revenue': q['quarterly_revenue'],
+                'quarterly_revenue_free_float': q['quarterly_revenue_free_float'],
+                'quarterly_pat': q['quarterly_pat'],
+                'quarterly_pat_free_float': q['quarterly_pat_free_float']
+            }
+
+        # Bulk load annual ratios
+        from .models import StockAnnualRatios
+        annual_data = StockAnnualRatios.objects.filter(stock_id__in=stock_ids).values(
+            'stock_id', 'financial_year', 'roce_percentage', 'roe_percentage', 'retention_percentage'
+        )
+        for a in annual_data:
+            key = (a['stock_id'], a['financial_year'])
+            data_cache['annual'][key] = {
+                'roce_percentage': a['roce_percentage'],
+                'roe_percentage': a['roe_percentage'],
+                'retention_percentage': a['retention_percentage']
+            }
+
+        # Bulk load price data
+        from .models import StockPrice
+        price_data = StockPrice.objects.filter(stock_id__in=stock_ids).values(
+            'stock_id', 'price_date', 'share_price', 'pr_ratio', 'pe_ratio'
+        )
+        for p in price_data:
+            key = (p['stock_id'], p['price_date'].strftime('%Y-%m-%d'))
+            data_cache['price'][key] = {
+                'share_price': p['share_price'],
+                'pr_ratio': p['pr_ratio'],
+                'pe_ratio': p['pe_ratio']
+            }
+
+        logger.info(f"Preloaded data for {len(stock_ids)} stocks")
+        self.data_cache = data_cache
+        return data_cache
+
     def get_header_driven_export_structure(self):
         """
         NEW: Generate export structure that matches import file format exactly.
@@ -941,71 +1037,79 @@ class BlockBasedExportGenerator:
         return row_data
 
     def _get_stock_value_for_period(self, stock, data_type, period):
-        """Get stock value for specific data type and period"""
+        """Get stock value for specific data type and period using preloaded cache"""
         try:
+            # Use preloaded cache for O(1) lookup instead of database queries
+            if not hasattr(self, 'data_cache'):
+                # Fallback to old method if cache not available (shouldn't happen)
+                logger.warning("Data cache not found, using slow query method")
+                return self._get_stock_value_for_period_slow(stock, data_type, period)
+
+            stock_id = stock.stock_id
+
             if data_type == 'market_cap':
-                record = stock.market_cap_data.filter(date=period).first()
-                return record.market_cap if record else None
+                data = self.data_cache['market_cap'].get((stock_id, period), {})
+                return data.get('market_cap')
 
             elif data_type == 'market_cap_free_float':
-                record = stock.market_cap_data.filter(date=period).first()
-                return record.market_cap_free_float if record else None
+                data = self.data_cache['market_cap'].get((stock_id, period), {})
+                return data.get('market_cap_free_float')
 
             elif data_type == 'ttm_revenue':
-                record = stock.ttm_data.filter(period=period).first()
-                return record.ttm_revenue if record else None
+                data = self.data_cache['ttm'].get((stock_id, period), {})
+                return data.get('ttm_revenue')
 
             elif data_type == 'ttm_revenue_free_float':
-                record = stock.ttm_data.filter(period=period).first()
-                return record.ttm_revenue_free_float if record else None
+                data = self.data_cache['ttm'].get((stock_id, period), {})
+                return data.get('ttm_revenue_free_float')
 
             elif data_type == 'ttm_pat':
-                record = stock.ttm_data.filter(period=period).first()
-                return record.ttm_pat if record else None
+                data = self.data_cache['ttm'].get((stock_id, period), {})
+                return data.get('ttm_pat')
 
             elif data_type == 'ttm_pat_free_float':
-                record = stock.ttm_data.filter(period=period).first()
-                return record.ttm_pat_free_float if record else None
+                data = self.data_cache['ttm'].get((stock_id, period), {})
+                return data.get('ttm_pat_free_float')
 
             elif data_type == 'quarterly_revenue':
-                record = stock.quarterly_data.filter(period=period).first()
-                return record.quarterly_revenue if record else None
+                data = self.data_cache['quarterly'].get((stock_id, period), {})
+                return data.get('quarterly_revenue')
 
             elif data_type == 'quarterly_revenue_free_float':
-                record = stock.quarterly_data.filter(period=period).first()
-                return record.quarterly_revenue_free_float if record else None
+                data = self.data_cache['quarterly'].get((stock_id, period), {})
+                return data.get('quarterly_revenue_free_float')
 
             elif data_type == 'quarterly_pat':
-                record = stock.quarterly_data.filter(period=period).first()
-                return record.quarterly_pat if record else None
+                data = self.data_cache['quarterly'].get((stock_id, period), {})
+                return data.get('quarterly_pat')
 
             elif data_type == 'quarterly_pat_free_float':
-                record = stock.quarterly_data.filter(period=period).first()
-                return record.quarterly_pat_free_float if record else None
+                data = self.data_cache['quarterly'].get((stock_id, period), {})
+                return data.get('quarterly_pat_free_float')
 
             elif data_type == 'roce':
-                record = stock.annual_ratios.filter(financial_year=period).first()
-                return record.roce_percentage if record else None
+                data = self.data_cache['annual'].get((stock_id, period), {})
+                return data.get('roce_percentage')
 
             elif data_type == 'roe':
-                record = stock.annual_ratios.filter(financial_year=period).first()
-                return record.roe_percentage if record else None
+                data = self.data_cache['annual'].get((stock_id, period), {})
+                return data.get('roe_percentage')
 
             elif data_type == 'retention':
-                record = stock.annual_ratios.filter(financial_year=period).first()
-                return record.retention_percentage if record else None
+                data = self.data_cache['annual'].get((stock_id, period), {})
+                return data.get('retention_percentage')
 
             elif data_type == 'share_price':
-                record = stock.price_data.filter(price_date=period).first()
-                return record.share_price if record else None
+                data = self.data_cache['price'].get((stock_id, period), {})
+                return data.get('share_price')
 
             elif data_type == 'pr_ratio':
-                record = stock.price_data.filter(price_date=period).first()
-                return record.pr_ratio if record else None
+                data = self.data_cache['price'].get((stock_id, period), {})
+                return data.get('pr_ratio')
 
             elif data_type == 'pe_ratio':
-                record = stock.price_data.filter(price_date=period).first()
-                return record.pe_ratio if record else None
+                data = self.data_cache['price'].get((stock_id, period), {})
+                return data.get('pe_ratio')
 
         except Exception as e:
             logger.error(f"Error getting value for {data_type}, period {period}: {e}")
