@@ -261,6 +261,44 @@ class FundPortfolioExportGenerator(BlockBasedExportGenerator):
             'pe_dates': sorted(pe_dates, reverse=True)
         }
 
+    def _generate_import_style_headers(self, blocks, total_columns):
+        """
+        Override parent to correctly position fundamental headers for Fund Analysis.
+        Fund has 18 columns in basic_info, so fundamentals are at columns 11-17 (not 6-12).
+        """
+        # Call parent to get base headers
+        headers = super()._generate_import_style_headers(blocks, total_columns)
+
+        # Override the hardcoded fundamental headers from parent
+        # Fund Analysis: Columns 0-10 are Company, Accord, Sector, Cap, Market Cap,
+        #                Weights, Factor, Value, Shares, Price, Free Float
+        # Fund Analysis: Columns 11-17 are Fundamentals (Revenue/PAT CAGR/TTM, PR ratios)
+        fundamental_start_col = 11
+
+        # Row 6: Section header spanning fundamental columns (11-17)
+        fundamentals_section = "Stock wise Fundamentals and Valuations"
+        for col_idx in range(fundamental_start_col, fundamental_start_col + 7):
+            if col_idx < total_columns:
+                headers['row_6'][col_idx] = fundamentals_section
+
+        # Row 7: Subcategory labels
+        if total_columns > 11:
+            headers['row_7'][11] = "Revenue"   # 6 Year CAGR
+        if total_columns > 12:
+            headers['row_7'][12] = "Revenue"   # TTM
+        if total_columns > 13:
+            headers['row_7'][13] = "PAT"       # 6 Year CAGR
+        if total_columns > 14:
+            headers['row_7'][14] = "PAT"       # TTM
+        if total_columns > 15:
+            headers['row_7'][15] = "PR"        # Current
+        if total_columns > 16:
+            headers['row_7'][16] = "PR"        # 2 Yr Avg
+        if total_columns > 17:
+            headers['row_7'][17] = "PR"        # Reval/Deval
+
+        return headers
+
     def populate_fund_stock_row(self, holding, blocks, total_columns):
         """
         Populate a single stock row with fund-specific data.
@@ -493,6 +531,11 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
         # NOTE: No S.No column - removed as per user requirement
         ws.append(row_data)
 
+    # Add 5 blank rows gap before TOTALS (as per sample file)
+    for _ in range(5):
+        blank_row = [''] * total_columns
+        ws.append(blank_row)
+
     # Add TOTALS row
     totals_row = ['TOTALS'] + [''] * (total_columns - 1)
     total_market_cap = sum(h.market_value or 0 for h in holdings if h.market_value)
@@ -555,11 +598,11 @@ def apply_portfolio_analysis_formatting(ws, total_columns):
     metric_fill = PatternFill(start_color='FFFFCC', end_color='FFFFCC', fill_type='solid')
 
     # Calculate metric row range
-    # Metric rows start after: 8 header rows + N stock rows + 1 totals row
-    # We know metric rows are the last 22 rows (plus totals row before them)
+    # Structure: 8 header rows + N stock rows + 5 blank rows + TOTALS row + 27 metric rows
+    # Metric rows: 22 with data + 5 blank = 27 total
     total_rows = ws.max_row
-    metric_start_row = total_rows - 21  # Last 22 rows are metrics
-    totals_row = metric_start_row - 1
+    metric_start_row = total_rows - 26  # Last 27 rows are metrics (22 data + 5 blank)
+    totals_row = metric_start_row - 1   # TOTALS row is before metrics
 
     logger.info(f"Applying formatting - Total rows: {total_rows}, Metric rows: {metric_start_row}-{total_rows}, Totals row: {totals_row}")
 
@@ -620,9 +663,21 @@ def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_
     # Create period lookup
     metrics_by_period = {pm.period_date: pm for pm in portfolio_metrics_query}
 
+    # Debug logging
+    logger.info(f"Portfolio metrics - Found {len(metrics_by_period)} periods for fund {scheme.name}")
+    logger.info(f"Section start columns: {section_start_columns}")
+
     # Get all periods (TTM + Quarterly combined, sorted descending)
     all_ttm_periods = sorted(periods.get('ttm_periods', []), reverse=True)
     all_quarterly_periods = sorted(periods.get('quarterly_periods', []), reverse=True)
+
+    logger.info(f"TTM periods: {len(all_ttm_periods)}, Quarterly periods: {len(all_quarterly_periods)}")
+
+    # Sample first metric for debugging
+    if metrics_by_period:
+        first_period = list(metrics_by_period.keys())[0]
+        first_pm = metrics_by_period[first_period]
+        logger.info(f"Sample metric - Period: {first_period}, PATM: {first_pm.patm}, QoQ: {first_pm.qoq_growth}, YoY: {first_pm.yoy_growth}")
 
     # Define 27 metric rows (22 with data + 5 blank)
     # Format: (field_name, label, section_type, periods_list)
@@ -665,16 +720,33 @@ def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_
             # Get section start column
             section_start_col = section_start_columns.get(section_type)
 
+            # Debug logging for first few metrics
+            if metric_label in ['PATM', 'QoQ', 'YoY']:
+                logger.info(f"Metric '{metric_label}': section={section_type}, start_col={section_start_col}, periods={len(periods_list) if periods_list else 0}")
+
             if section_start_col is not None and periods_list:
                 # Populate values for each period in this section
                 for period_idx, period in enumerate(periods_list):
                     col_idx = section_start_col + period_idx
 
                     if col_idx < total_columns:
-                        # Get portfolio metric for this period
-                        pm = metrics_by_period.get(period)
+                        # Convert period string (e.g., '202506') to date object (2025-06-01)
+                        # PortfolioMetricsLog.period_date is a date field, but periods are collected as strings
+                        from datetime import datetime
+                        if isinstance(period, str):
+                            # Period is YYYYMM string, convert to date (first day of month)
+                            period_date = datetime.strptime(period, '%Y%m').date()
+                        else:
+                            period_date = period  # Already a date object
+
+                        # Get portfolio metric for this period using DATE object
+                        pm = metrics_by_period.get(period_date)
                         if pm:
                             value = getattr(pm, metric_field, None)
                             metric_row[col_idx] = value
+
+                            # Debug logging for first 3 values of key metrics
+                            if metric_label in ['PATM', 'QoQ'] and period_idx < 3:
+                                logger.info(f"  Writing {metric_label} for {period_date}: value={value}, col={col_idx}")
 
         ws.append(metric_row)

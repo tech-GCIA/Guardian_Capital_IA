@@ -1408,20 +1408,24 @@ class PortfolioMetricsCalculator:
                 # Get TTM/Quarterly data for this period
                 from gcia_app.models import StockTTMData, StockQuarterlyData
 
+                # Convert period_date to YYYYMM integer format for querying
+                # StockTTMData and StockQuarterlyData use integer period field (e.g., 202506)
+                period_int = int(period_date.strftime('%Y%m')) if hasattr(period_date, 'strftime') else period_date
+
                 if period_type == 'ttm':
-                    ttm_data = StockTTMData.objects.filter(stock=stock, period=period_date).first()
+                    ttm_data = StockTTMData.objects.filter(stock=stock, period=period_int).first()
                     if ttm_data:
                         if ttm_data.ttm_revenue:
                             portfolio_financials['ttm_revenue'] += ttm_data.ttm_revenue * weight
                         if ttm_data.ttm_pat:
                             portfolio_financials['ttm_pat'] += ttm_data.ttm_pat * weight
                 elif period_type == 'quarterly':
-                    quarterly_data = StockQuarterlyData.objects.filter(stock=stock, period=period_date).first()
+                    quarterly_data = StockQuarterlyData.objects.filter(stock=stock, period=period_int).first()
                     if quarterly_data:
-                        if quarterly_data.revenue:
-                            portfolio_financials['ttm_revenue'] += quarterly_data.revenue * weight
-                        if quarterly_data.pat:
-                            portfolio_financials['ttm_pat'] += quarterly_data.pat * weight
+                        if quarterly_data.quarterly_revenue:
+                            portfolio_financials['ttm_revenue'] += quarterly_data.quarterly_revenue * weight
+                        if quarterly_data.quarterly_pat:
+                            portfolio_financials['ttm_pat'] += quarterly_data.quarterly_pat * weight
 
                 # Weight all other metrics
                 for metric_name, value in metrics.items():
