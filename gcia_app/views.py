@@ -2324,22 +2324,45 @@ def download_fund_metrics(request, scheme_id):
         logger.info(f"Exclusion parameters - MarketCap: {exclude_marketcap_year}, Holdings: {exclude_holdings_ids}")
 
         # Use enhanced Excel export functionality
-        from .enhanced_excel_export import generate_enhanced_portfolio_analysis_excel, generate_recalculated_analysis_excel
+        from .enhanced_excel_export import (
+            generate_enhanced_portfolio_analysis_excel,
+            generate_recalculated_analysis_excel,
+            extract_summary_data_from_worksheet,
+            create_summary_sheet
+        )
         from openpyxl import load_workbook
 
         if not has_exclusions:
-            # NO EXCLUSIONS: Return single-sheet Excel (existing behavior)
-            logger.info("No exclusions - generating single-sheet Excel")
+            # NO EXCLUSIONS: Return single-sheet Excel with Summary
+            logger.info("No exclusions - generating single-sheet Excel with Summary")
             excel_content = generate_enhanced_portfolio_analysis_excel(scheme)
 
+            # Load the workbook to add Summary sheet
+            wb = load_workbook(excel_content)
+            analysis_ws = wb.active
+
+            # Extract summary data from the analysis sheet
+            logger.info("Extracting summary data for Summary sheet...")
+            summary_data = extract_summary_data_from_worksheet(analysis_ws, scheme)
+
+            # Create Summary sheet (will be inserted as first sheet)
+            logger.info("Creating Summary sheet...")
+            create_summary_sheet(wb, scheme, summary_data)
+
+            # Save the updated workbook
+            from io import BytesIO
+            final_excel = BytesIO()
+            wb.save(final_excel)
+            final_excel.seek(0)
+
             response = HttpResponse(
-                excel_content.getvalue(),
+                final_excel.getvalue(),
                 content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
             )
             filename = f"{scheme.name}_Portfolio_Analysis_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
-            logger.info(f"Single-sheet Excel file generated: {filename}")
+            logger.info(f"Single-sheet Excel file with Summary generated: {filename}")
             return response
 
         else:
@@ -2404,7 +2427,13 @@ def download_fund_metrics(request, scheme_id):
 
             logger.info("Dual-sheet workbook created successfully")
 
-            # STEP 5: Save and return dual-sheet workbook
+            # STEP 5: Add Summary sheet based on Recalculated Analysis
+            logger.info("Creating Summary sheet from Recalculated Analysis...")
+            summary_data = extract_summary_data_from_worksheet(new_ws, scheme)
+            create_summary_sheet(default_wb, scheme, summary_data)
+            logger.info("Summary sheet added successfully")
+
+            # STEP 6: Save and return dual-sheet workbook with Summary
             dual_excel_content = BytesIO()
             default_wb.save(dual_excel_content)
             dual_excel_content.seek(0)
@@ -2416,7 +2445,7 @@ def download_fund_metrics(request, scheme_id):
             filename = f"{scheme.name}_Portfolio_Analysis_Dual_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
-            logger.info(f"Dual-sheet Excel file generated: {filename}")
+            logger.info(f"Dual-sheet Excel file with Summary generated: {filename}")
             return response
 
     except AMCFundScheme.DoesNotExist:

@@ -1061,3 +1061,588 @@ def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_
         ws.append(metric_row)
 
     logger.info(f"Added 27 portfolio metric rows calculated from TOTALS")
+
+
+# ============================================================================
+# SUMMARY SHEET CREATION FUNCTIONS
+# ============================================================================
+
+def extract_summary_data_from_worksheet(ws, scheme, stock_rows_start=9):
+    """
+    Extract key metrics from an analysis worksheet for the Summary sheet.
+
+    Args:
+        ws: Worksheet object (Default Analysis or Recalculated Analysis)
+        scheme: AMCFundScheme instance
+        stock_rows_start: Row number where stock data starts (default: 9)
+
+    Returns:
+        dict: Summary data including all metrics needed for Summary sheet
+    """
+    logger.info(f"Extracting summary data from worksheet: {ws.title}")
+
+    summary_data = {
+        'fund_name': scheme.name,
+        'num_securities': 0,
+        'stocks_80_pct': 0,
+        'pct_companies_considered': 0,
+        'current_pe': None,
+        'pe_2yr_avg': None,
+        'pe_5yr_avg': None,
+        'pe_reval_2yr': None,
+        'pe_reval_5yr': None,
+        'current_pr': None,
+        'pr_2yr_avg': None,
+        'pr_5yr_avg': None,
+        'pr_reval_2yr': None,
+        'pr_reval_5yr': None,
+        'revenue_yoy': None,
+        'revenue_6yr_cagr': None,
+        'pat_yoy': None,
+        'pat_6yr_cagr': None,
+        'roe_current': None,
+        'roce_current': None,
+        'retention_current': None,
+        'sector_weights': {},
+        'market_cap_breakdown': {},
+        'top_10_weight': 0,
+    }
+
+    # Find TOTALS row and metric rows
+    totals_row_idx = None
+    metric_rows_start = None
+
+    for row_idx in range(stock_rows_start, ws.max_row + 1):
+        cell_value = ws.cell(row=row_idx, column=1).value
+        if cell_value == 'TOTALS':
+            totals_row_idx = row_idx
+            metric_rows_start = row_idx + 1
+            break
+
+    if not totals_row_idx:
+        logger.warning("Could not find TOTALS row in worksheet")
+        return summary_data
+
+    # Count securities (rows between header and blank rows before TOTALS)
+    stock_count = 0
+    cumulative_weight = 0
+    stocks_80_pct = 0
+    top_10_weight = 0
+    sector_weights = {}
+    cap_breakdown = {'Large Cap': 0, 'Mid Cap': 0, 'Small Cap': 0, 'Next 250': 0, 'Micro Cap': 0}
+
+    for row_idx in range(stock_rows_start, totals_row_idx):
+        company_name = ws.cell(row=row_idx, column=1).value
+        if company_name and company_name.strip() and company_name != '':
+            stock_count += 1
+
+            # Get weight (column 6 - Weights)
+            weight = ws.cell(row=row_idx, column=6).value
+            weight_val = 0  # Initialize to 0 for each row
+            if weight:
+                try:
+                    weight_val = float(weight)
+
+                    # Top 10 weight
+                    if stock_count <= 10:
+                        top_10_weight += weight_val
+
+                    # 80% of fund calculation
+                    cumulative_weight += weight_val
+                    if cumulative_weight <= 0.80:
+                        stocks_80_pct = stock_count
+                    elif stocks_80_pct == 0:
+                        stocks_80_pct = stock_count
+                except (ValueError, TypeError):
+                    weight_val = 0  # Reset to 0 if conversion fails
+
+            # Get sector (column 3)
+            sector = ws.cell(row=row_idx, column=3).value
+            if sector:
+                sector_weights[sector] = sector_weights.get(sector, 0) + weight_val
+
+            # Get cap (column 4)
+            cap = ws.cell(row=row_idx, column=4).value
+            if cap and cap in cap_breakdown:
+                cap_breakdown[cap] = cap_breakdown.get(cap, 0) + weight_val
+
+    summary_data['num_securities'] = stock_count
+    summary_data['stocks_80_pct'] = stocks_80_pct
+    summary_data['pct_companies_considered'] = 1.0 if stock_count > 0 else 0
+    summary_data['top_10_weight'] = top_10_weight
+    summary_data['sector_weights'] = sector_weights
+    summary_data['market_cap_breakdown'] = cap_breakdown
+
+    # Helper function to get first numeric value from a metric row
+    def get_first_metric_value(row_idx):
+        """Get the first non-empty numeric value from a metric row"""
+        if row_idx is None:
+            return None
+        for col_idx in range(2, min(ws.max_column + 1, 50)):
+            val = ws.cell(row=row_idx, column=col_idx).value
+            if val is not None and val != '':
+                try:
+                    return float(val)
+                except (ValueError, TypeError):
+                    continue
+        return None
+
+    # Find anchor labels to identify metric sections by position
+    # This avoids the duplicate label problem (e.g., "2 year average" appears for both PE and PR)
+    pe_section_start = None
+    pr_section_start = None
+    yoy_row = None
+    cagr_row = None
+    pr_10q_low_row = None
+    pr_10q_high_row = None
+
+    for row_idx in range(metric_rows_start, ws.max_row + 1):
+        label = ws.cell(row=row_idx, column=1).value
+        if label:
+            label_str = label.strip()
+            if label_str == 'Current PE' and pe_section_start is None:
+                pe_section_start = row_idx
+            elif label_str == 'Current PR' and pr_section_start is None:
+                pr_section_start = row_idx
+            elif label_str == 'YoY' and yoy_row is None:
+                yoy_row = row_idx
+            elif label_str == '6 year CAGR' and cagr_row is None:
+                cagr_row = row_idx
+            elif label_str == '10 quarter- PR- low' and pr_10q_low_row is None:
+                pr_10q_low_row = row_idx
+            elif label_str == '10 quarter- PR- high' and pr_10q_high_row is None:
+                pr_10q_high_row = row_idx
+
+    # Extract PE metrics using position relative to "Current PE"
+    # Structure: Current PE, 2yr avg, 5yr avg, 2yr Reval, 5yr Reval, [blank]
+    if pe_section_start:
+        summary_data['current_pe'] = get_first_metric_value(pe_section_start)
+        summary_data['pe_2yr_avg'] = get_first_metric_value(pe_section_start + 1)
+        summary_data['pe_5yr_avg'] = get_first_metric_value(pe_section_start + 2)
+        summary_data['pe_reval_2yr'] = get_first_metric_value(pe_section_start + 3)
+        summary_data['pe_reval_5yr'] = get_first_metric_value(pe_section_start + 4)
+
+    # Extract PR metrics using position relative to "Current PR"
+    # Structure: Current PR, 2yr avg, 5yr avg, 2yr Reval, 5yr Reval, [blank]
+    if pr_section_start:
+        summary_data['current_pr'] = get_first_metric_value(pr_section_start)
+        summary_data['pr_2yr_avg'] = get_first_metric_value(pr_section_start + 1)
+        summary_data['pr_5yr_avg'] = get_first_metric_value(pr_section_start + 2)
+        summary_data['pr_reval_2yr'] = get_first_metric_value(pr_section_start + 3)
+        summary_data['pr_reval_5yr'] = get_first_metric_value(pr_section_start + 4)
+
+    # Extract growth metrics
+    if yoy_row:
+        summary_data['revenue_yoy'] = get_first_metric_value(yoy_row)
+        summary_data['pat_yoy'] = get_first_metric_value(yoy_row)
+    if cagr_row:
+        summary_data['revenue_6yr_cagr'] = get_first_metric_value(cagr_row)
+        summary_data['pat_6yr_cagr'] = get_first_metric_value(cagr_row)
+
+    # Extract ROE, ROCE, Retention by searching multiple header rows (6, 7, 8)
+    # These values are in the data columns, so we search for the column header
+    for header_row in [6, 7, 8]:
+        for col_idx in range(1, min(ws.max_column + 1, 500)):
+            header_val = ws.cell(row=header_row, column=col_idx).value
+            if header_val:
+                header_str = str(header_val).lower()
+                if 'roe' in header_str and summary_data['roe_current'] is None:
+                    val = ws.cell(row=totals_row_idx, column=col_idx).value
+                    if val:
+                        try:
+                            summary_data['roe_current'] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                elif 'roce' in header_str and summary_data['roce_current'] is None:
+                    val = ws.cell(row=totals_row_idx, column=col_idx).value
+                    if val:
+                        try:
+                            summary_data['roce_current'] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+                elif 'retention' in header_str and summary_data['retention_current'] is None:
+                    val = ws.cell(row=totals_row_idx, column=col_idx).value
+                    if val:
+                        try:
+                            summary_data['retention_current'] = float(val)
+                        except (ValueError, TypeError):
+                            pass
+
+    logger.info(f"Extracted summary data: {stock_count} securities, {len(sector_weights)} sectors")
+    logger.info(f"  PE: current={summary_data['current_pe']}, 2yr={summary_data['pe_2yr_avg']}")
+    logger.info(f"  PR: current={summary_data['current_pr']}, 2yr={summary_data['pr_2yr_avg']}")
+    return summary_data
+
+
+def create_summary_sheet(workbook, scheme, summary_data):
+    """
+    Create a Summary sheet in the workbook with all sections.
+
+    Args:
+        workbook: openpyxl Workbook object
+        scheme: AMCFundScheme instance
+        summary_data: Dict containing extracted metrics
+
+    Returns:
+        Worksheet: The created Summary sheet
+    """
+    logger.info(f"Creating Summary sheet for {scheme.name}")
+
+    # Create sheet at position 0 (first sheet)
+    ws = workbook.create_sheet("Summary", 0)
+
+    # Section 1: Title Header (Row 2)
+    ws['B2'] = f"{summary_data['fund_name']} - Summary"
+
+    # Section 2: Basic Details (Rows 4-10)
+    ws['B4'] = "# Basic Details"
+    ws['B6'] = "Particulars"
+    ws['C6'] = "Value"
+    ws['B7'] = "No. of securities"
+    ws['C7'] = summary_data['num_securities']
+    ws['B8'] = "80% of the Fund"
+    ws['C8'] = summary_data['stocks_80_pct']
+    ws['B9'] = "Cash"
+    ws['C9'] = ""  # Leave blank as not available
+    ws['B10'] = "% of companies considered"
+    # pct_companies_considered is already 1.0 (100%), display as percentage
+    ws['C10'] = summary_data['pct_companies_considered']
+
+    # Section 3: Pricing & Concentration (Rows 12-18)
+    ws['B12'] = "# Pricing & Concentration"
+
+    # Headers (rows 14-15 with merged cells)
+    ws['B14'] = "Funds (Peers)"
+    ws['C14'] = "Expense Ratio"
+    ws['E14'] = "No. of Stocks"
+    ws['F14'] = "Top 10 Stocks"
+    ws['G14'] = "PE Ratio"
+    ws['H14'] = "Revenue Growth (6 yrs)"
+    ws['I14'] = "AUM"
+    ws['J14'] = "Cash (%)"
+
+    ws['C15'] = "Direct"
+    ws['D15'] = "Regular"
+
+    # Current fund data (row 16)
+    ws['B16'] = summary_data['fund_name']
+    ws['C16'] = ""  # Expense ratio direct - leave blank
+    ws['D16'] = ""  # Expense ratio regular - leave blank
+    ws['E16'] = summary_data['num_securities']
+    # top_10_weight is in decimal form (e.g., 0.45 for 45%)
+    ws['F16'] = summary_data['top_10_weight']
+    # PE ratio - display as number (not percentage)
+    ws['G16'] = summary_data['current_pe']
+    # revenue_6yr_cagr is in decimal form (e.g., 0.12 for 12%)
+    ws['H16'] = summary_data['revenue_6yr_cagr']
+    ws['I16'] = ""  # AUM - leave blank
+    ws['J16'] = ""  # Cash - leave blank
+
+    # Section 4: Fundamentals (Rows 20-27)
+    ws['B20'] = "# Fundamentals"
+    ws['B22'] = "Particulars"
+    ws['C22'] = "Current Year"
+    ws['D22'] = "6 Year CAGR"
+    ws['E22'] = ""
+
+    ws['B23'] = "Revenue Growth"
+    # YoY and CAGR are in decimal form from calculation functions
+    ws['C23'] = summary_data['revenue_yoy']
+    ws['D23'] = summary_data['revenue_6yr_cagr']
+
+    ws['B24'] = "PAT Growth"
+    ws['C24'] = summary_data['pat_yoy']
+    ws['D24'] = summary_data['pat_6yr_cagr']
+
+    ws['B25'] = "ROE"
+    # ROE/ROCE/Retention are read from TOTALS row - check if they need conversion
+    roe_val = summary_data['roe_current']
+    ws['C25'] = roe_val
+    ws['D25'] = roe_val  # Using same as current for avg
+    ws['E25'] = "Avg"
+
+    ws['B26'] = "ROCE"
+    roce_val = summary_data['roce_current']
+    ws['C26'] = roce_val
+    ws['D26'] = roce_val  # Using same as current for avg
+    ws['E26'] = "Avg"
+
+    ws['B27'] = "Retention Rate"
+    retention_val = summary_data['retention_current']
+    ws['C27'] = retention_val
+    ws['D27'] = retention_val  # Using same as current for avg
+    ws['E27'] = "Avg"
+
+    # Section 5: Valuation (Rows 29-37)
+    ws['B29'] = "# Valuation"
+    ws['B31'] = "Particulars"
+    ws['C31'] = "Re/Devaluation"
+    ws['D31'] = "Current"
+    ws['E31'] = "2 Yr Avg"
+
+    # PE row - PE values are ratios, not percentages
+    ws['B32'] = "PE"
+    current_pe = summary_data['current_pe']
+    pe_2yr = summary_data['pe_2yr_avg']
+    if current_pe and pe_2yr and current_pe != 0:
+        # Reval/Deval is (avg - current) / current, returns decimal
+        ws['C32'] = (pe_2yr - current_pe) / current_pe
+    else:
+        ws['C32'] = ""
+    ws['D32'] = current_pe
+    ws['E32'] = pe_2yr
+
+    # PR row - PR values are ratios, not percentages
+    ws['B33'] = "PR"
+    current_pr = summary_data['current_pr']
+    pr_2yr = summary_data['pr_2yr_avg']
+    if current_pr and pr_2yr and current_pr != 0:
+        ws['C33'] = (pr_2yr - current_pr) / current_pr
+    else:
+        ws['C33'] = ""
+    ws['D33'] = current_pr
+    ws['E33'] = pr_2yr
+
+    # Expected Return calculations
+    ws['B35'] = "Expected Return (PR & Revenue)"
+    rev_cagr = summary_data['revenue_6yr_cagr']
+    pr_reval = ws['C33'].value if ws['C33'].value else 0
+    if rev_cagr is not None:
+        try:
+            # rev_cagr is decimal (0.12), pr_reval is decimal (0.05)
+            # Result should be decimal for percentage display
+            ws['C35'] = rev_cagr + (pr_reval / 5 if pr_reval else 0)
+        except:
+            ws['C35'] = ""
+
+    ws['B37'] = "Expected Return (PE & PAT)"
+    pat_cagr = summary_data['pat_6yr_cagr']
+    pe_reval = ws['C32'].value if ws['C32'].value else 0
+    if pat_cagr is not None:
+        try:
+            ws['C37'] = pat_cagr + (pe_reval / 5 if pe_reval else 0)
+        except:
+            ws['C37'] = ""
+
+    # Section 6: Portfolio Analysis - DYNAMIC ROW POSITIONING
+    ws['B39'] = "# Portfolio Analysis"
+
+    # Sector Weights (left side)
+    ws['B41'] = "Sector"
+    ws['C41'] = "Weight"
+
+    sector_row_idx = 42
+    for sector, weight in sorted(summary_data['sector_weights'].items(), key=lambda x: -x[1]):
+        ws.cell(row=sector_row_idx, column=2, value=sector)
+        ws.cell(row=sector_row_idx, column=3, value=weight)
+        sector_row_idx += 1
+
+    # Total sector weights
+    ws.cell(row=sector_row_idx, column=2, value="Total")
+    ws.cell(row=sector_row_idx, column=3, value=sum(summary_data['sector_weights'].values()))
+    sector_end_row = sector_row_idx
+
+    # Market Cap Breakdown (right side) - starts at same row as sectors
+    ws['E41'] = "Market Cap"
+    ws['F41'] = "Weight"
+
+    cap_order = ['Large Cap', 'Mid Cap', 'Small Cap', 'Next 250', 'Micro Cap']
+    cap_row_idx = 42
+    for cap_type in cap_order:
+        ws.cell(row=cap_row_idx, column=5, value=cap_type)
+        ws.cell(row=cap_row_idx, column=6, value=summary_data['market_cap_breakdown'].get(cap_type, 0))
+        cap_row_idx += 1
+
+    # Total market cap
+    ws.cell(row=cap_row_idx, column=5, value="Total")
+    ws.cell(row=cap_row_idx, column=6, value=sum(summary_data['market_cap_breakdown'].values()))
+    cap_end_row = cap_row_idx
+
+    # Determine where Portfolio Analysis section ends
+    portfolio_analysis_end_row = max(sector_end_row, cap_end_row)
+
+    # Section 7: Fund Performance - DYNAMIC positioning after Portfolio Analysis
+    # Add 2 blank rows after Portfolio Analysis section
+    fund_perf_start_row = portfolio_analysis_end_row + 3
+
+    ws.cell(row=fund_perf_start_row, column=2, value=f"# Fund Performance (as of {datetime.now().strftime('%d %B %Y')})")
+
+    ws.cell(row=fund_perf_start_row + 2, column=2, value="Funds")
+    ws.cell(row=fund_perf_start_row + 2, column=3, value="1M")
+    ws.cell(row=fund_perf_start_row + 2, column=4, value="3M")
+    ws.cell(row=fund_perf_start_row + 2, column=5, value="6M")
+    ws.cell(row=fund_perf_start_row + 2, column=6, value="1Y")
+    ws.cell(row=fund_perf_start_row + 2, column=7, value="3Y")
+    ws.cell(row=fund_perf_start_row + 2, column=8, value="5Y")
+
+    # Current fund row (performance data if available)
+    ws.cell(row=fund_perf_start_row + 3, column=2, value=summary_data['fund_name'])
+    # Leave performance columns blank as data not available
+    ws.cell(row=fund_perf_start_row + 3, column=3, value="")
+    ws.cell(row=fund_perf_start_row + 3, column=4, value="")
+    ws.cell(row=fund_perf_start_row + 3, column=5, value="")
+    ws.cell(row=fund_perf_start_row + 3, column=6, value="")
+    ws.cell(row=fund_perf_start_row + 3, column=7, value="")
+    ws.cell(row=fund_perf_start_row + 3, column=8, value="")
+
+    # Store dynamic row info for formatting
+    ws._summary_layout = {
+        'portfolio_analysis_end_row': portfolio_analysis_end_row,
+        'fund_perf_start_row': fund_perf_start_row,
+        'sector_end_row': sector_end_row,
+        'cap_end_row': cap_end_row
+    }
+
+    # Apply formatting
+    format_summary_sheet(ws)
+
+    logger.info("Summary sheet created successfully")
+    return ws
+
+
+def format_summary_sheet(ws):
+    """
+    Apply professional formatting to the Summary sheet.
+
+    Args:
+        ws: Worksheet object
+    """
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    # Get dynamic layout info if available
+    layout = getattr(ws, '_summary_layout', {})
+    portfolio_analysis_end_row = layout.get('portfolio_analysis_end_row', 60)
+    fund_perf_start_row = layout.get('fund_perf_start_row', 61)
+    sector_end_row = layout.get('sector_end_row', 55)
+    cap_end_row = layout.get('cap_end_row', 48)
+
+    # Define styles
+    title_font = Font(name='Calibri', size=14, bold=True)
+    section_header_font = Font(name='Calibri', size=11, bold=True)
+    table_header_font = Font(name='Calibri', size=10, bold=True)
+    data_font = Font(name='Calibri', size=10)
+
+    title_fill = PatternFill(start_color='D9E1F2', end_color='D9E1F2', fill_type='solid')
+    header_fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+
+    center_align = Alignment(horizontal='center', vertical='center')
+    left_align = Alignment(horizontal='left', vertical='center')
+    right_align = Alignment(horizontal='right', vertical='center')
+
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin')
+    )
+
+    # Helper function to apply borders to a table range
+    def apply_table_borders(start_row, end_row, start_col, end_col):
+        for row in range(start_row, end_row + 1):
+            for col in range(start_col, end_col + 1):
+                ws.cell(row=row, column=col).border = thin_border
+
+    # Format title (B2)
+    ws['B2'].font = title_font
+    ws['B2'].fill = title_fill
+    ws['B2'].alignment = center_align
+
+    # Format section headers (# Basic Details, etc.) - use dynamic fund_perf_start_row
+    section_header_rows = [4, 12, 20, 29, 39, fund_perf_start_row]
+    for row in section_header_rows:
+        cell = ws.cell(row=row, column=2)
+        cell.font = section_header_font
+
+    # Format table headers - use dynamic fund_perf_start_row + 2 for performance header
+    table_header_rows = [6, 14, 15, 22, 31, 41, fund_perf_start_row + 2]
+    for row in table_header_rows:
+        for col in range(2, 11):
+            cell = ws.cell(row=row, column=col)
+            if cell.value:
+                cell.font = table_header_font
+                cell.fill = header_fill
+                cell.alignment = center_align
+
+    # Set column widths
+    ws.column_dimensions['A'].width = 3
+    ws.column_dimensions['B'].width = 30
+    ws.column_dimensions['C'].width = 15
+    ws.column_dimensions['D'].width = 15
+    ws.column_dimensions['E'].width = 15
+    ws.column_dimensions['F'].width = 15
+    ws.column_dimensions['G'].width = 15
+    ws.column_dimensions['H'].width = 15
+    ws.column_dimensions['I'].width = 12
+    ws.column_dimensions['J'].width = 12
+
+    # Apply specific number formats based on cell purpose
+    # NOTE: Values from analysis sheet are in DECIMAL form (0.15 = 15%)
+    # Applying '0.00%' format will correctly display them as percentages
+
+    # Percentage cells - values in DECIMAL form (e.g., 0.15 for 15%)
+    # These include: pct_companies_considered, YoY, CAGR, reval/deval, expected returns
+    percentage_cells_decimal = ['C10', 'C23', 'C24', 'D23', 'D24', 'C32', 'C33', 'C35', 'C37',
+                                'F16', 'H16']
+    for cell_ref in percentage_cells_decimal:
+        cell = ws[cell_ref]
+        if cell.value is not None and isinstance(cell.value, (int, float)):
+            cell.number_format = '0.00%'
+
+    # ROE/ROCE/Retention - these are typically stored as percentages in DB (e.g., 15.5 for 15.5%)
+    # Display them as plain numbers with 2 decimal places, NOT as percentage format
+    ratio_style_cells = ['C25', 'D25', 'C26', 'D26', 'C27', 'D27']
+    for cell_ref in ratio_style_cells:
+        cell = ws[cell_ref]
+        if cell.value is not None and isinstance(cell.value, (int, float)):
+            cell.number_format = '0.00'
+
+    # Ratio cells (PE/PR values that should show as X.XX - these are ratios, not percentages)
+    ratio_cells = ['D32', 'E32', 'D33', 'E33', 'G16']
+    for cell_ref in ratio_cells:
+        cell = ws[cell_ref]
+        if cell.value is not None and isinstance(cell.value, (int, float)):
+            cell.number_format = '0.00'
+
+    # Integer cells (security counts)
+    integer_cells = ['C7', 'C8', 'E16']
+    for cell_ref in integer_cells:
+        cell = ws[cell_ref]
+        if cell.value is not None and isinstance(cell.value, (int, float)):
+            cell.number_format = '0'
+
+    # Format sector weights (column C) and market cap (column F) - DYNAMIC rows
+    # Weights are in decimal form (0.055 for 5.5%)
+    for row in range(42, sector_end_row + 1):
+        cell = ws.cell(row=row, column=3)
+        if cell.value is not None and isinstance(cell.value, (int, float)):
+            cell.number_format = '0.00%'
+
+    for row in range(42, cap_end_row + 1):
+        cell = ws.cell(row=row, column=6)
+        if cell.value is not None and isinstance(cell.value, (int, float)):
+            cell.number_format = '0.00%'
+
+    # Apply borders to data tables - use dynamic rows
+    apply_table_borders(6, 10, 2, 3)     # Basic Details
+    apply_table_borders(14, 16, 2, 10)   # Pricing & Concentration
+    apply_table_borders(22, 27, 2, 5)    # Fundamentals
+    apply_table_borders(31, 37, 2, 5)    # Valuation
+    apply_table_borders(41, sector_end_row, 2, 3)    # Sector Weights (dynamic)
+    apply_table_borders(41, cap_end_row, 5, 6)       # Market Cap Breakdown (dynamic)
+    apply_table_borders(fund_perf_start_row + 2, fund_perf_start_row + 4, 2, 8)    # Fund Performance (dynamic)
+
+    # Merge cells for title
+    ws.merge_cells('B2:E2')
+
+    # Merge cells for Pricing & Concentration headers
+    ws.merge_cells('B14:B15')
+    ws.merge_cells('C14:D14')
+    ws.merge_cells('E14:E15')
+    ws.merge_cells('F14:F15')
+    ws.merge_cells('G14:G15')
+    ws.merge_cells('H14:H15')
+    ws.merge_cells('I14:I15')
+    ws.merge_cells('J14:J15')
+
+    logger.info("Summary sheet formatting applied")
