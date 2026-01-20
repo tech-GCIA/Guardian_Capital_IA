@@ -388,15 +388,15 @@ class MetricsCalculationSession(models.Model):
 
 class PortfolioMetricsLog(models.Model):
 	"""
-	Stores portfolio-level weighted metrics for each fund across all periods
-	Metrics calculated following Excel methodology with proper weighting
+	Stores portfolio-level TOTALS-based metrics for each fund across all periods
+	Metrics calculated following Excel methodology: calculated from TOTALS row (simple sums of stock financials)
 	"""
 	portfolio_metrics_log_id = models.AutoField(primary_key=True)
 	scheme = models.ForeignKey(AMCFundScheme, on_delete=models.CASCADE, related_name='portfolio_metrics')
 	period_date = models.DateField(verbose_name='Period Date')
 	period_type = models.CharField(max_length=20, verbose_name='Period Type')  # 'quarterly', 'ttm', 'annual'
 
-	# 22 Weighted Portfolio Metrics (Excel Methodology)
+	# 22 Portfolio Metrics (TOTALS-based Excel Methodology)
 	patm = models.FloatField(null=True, blank=True, verbose_name='Portfolio PATM')
 	qoq_growth = models.FloatField(null=True, blank=True, verbose_name='Portfolio QoQ Growth')
 	yoy_growth = models.FloatField(null=True, blank=True, verbose_name='Portfolio YoY Growth')

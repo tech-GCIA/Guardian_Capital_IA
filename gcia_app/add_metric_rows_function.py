@@ -1,5 +1,11 @@
-# This is the add_portfolio_metric_rows function to be added to enhanced_excel_export.py
-# Add this at the end of the file (after line 587)
+# DEPRECATED: This file contains an older version of add_portfolio_metric_rows()
+# The function has been superseded by the implementation in enhanced_excel_export.py
+# which uses TOTALS-based calculations from excel_calc_functions.py
+#
+# This file is kept for reference only. Do not use this implementation.
+# For current implementation, see:
+#   - enhanced_excel_export.py: add_portfolio_metric_rows() (lines ~870-1050)
+#   - excel_calc_functions.py: calculation functions for metrics from TOTALS row
 
 def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_columns):
     """

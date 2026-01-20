@@ -17,6 +17,16 @@ from .dynamic_admin_export import BlockBasedExportGenerator
 from datetime import datetime
 import logging
 
+# Import calculation functions for portfolio metrics
+from .excel_calc_functions import (
+    calculate_patm_from_totals, calculate_qoq_from_totals,
+    calculate_yoy_from_totals, calculate_6yr_cagr_from_totals,
+    calculate_pe_pr_from_totals, calculate_pe_pr_averages_from_totals,
+    calculate_reval_deval_from_totals, calculate_pr_10q_extremes_from_totals,
+    calculate_pe_yield_from_totals, calculate_growth_from_totals, get_bond_rate,
+    build_section_column_mapping, create_metric_row
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -646,10 +656,11 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
             totals_row[col_idx] = column_sum
 
     ws.append(totals_row)
+    totals_row_index = ws.max_row
 
     # Add 27 portfolio metric rows at bottom (22 with data + 5 blank)
     logger.info("Adding portfolio metric rows")
-    add_portfolio_metric_rows(ws, scheme, generator.section_start_columns, periods, total_columns)
+    add_portfolio_metric_rows(ws, scheme, generator.section_start_columns, periods, total_columns, totals_row_index)
 
     logger.info("Block-based export completed with portfolio metrics")
 
@@ -774,11 +785,12 @@ def generate_recalculated_analysis_excel(scheme, filtered_holdings):
             totals_row[col_idx] = column_sum
 
     ws.append(totals_row)
+    totals_row_index = ws.max_row
 
     # Add 27 portfolio metric rows at bottom (22 with data + 5 blank)
     # NOTE: Portfolio metrics are recalculated from TOTALS row, not from database
     logger.info("Adding portfolio metric rows (recalculated from filtered TOTALS)")
-    add_portfolio_metric_rows(ws, scheme, generator.section_start_columns, periods, total_columns)
+    add_portfolio_metric_rows(ws, scheme, generator.section_start_columns, periods, total_columns, totals_row_index)
 
     logger.info("Recalculated Excel generation completed")
 
@@ -867,9 +879,9 @@ def apply_portfolio_analysis_formatting(ws, total_columns):
     logger.info("Excel formatting applied successfully with metric row highlighting")
 
 
-def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_columns):
+def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_columns, totals_row_index):
     """
-    Add 27 portfolio metric rows at bottom with values mapped to correct data sections
+    Calculate and add 27 portfolio metric rows from TOTALS row data
 
     Args:
         ws: Worksheet object
@@ -877,101 +889,175 @@ def add_portfolio_metric_rows(ws, scheme, section_start_columns, periods, total_
         section_start_columns: Dict mapping data_type to column index
         periods: Dict with period lists (ttm_periods, quarterly_periods, etc.)
         total_columns: Total number of columns in sheet
+        totals_row_index: Row index of TOTALS row in worksheet
     """
-    from gcia_app.models import PortfolioMetricsLog
+    logger.info(f"Calculating portfolio metrics from TOTALS row (index: {totals_row_index}) for {scheme.name}")
 
-    # Get all portfolio metrics for this fund
-    portfolio_metrics_query = PortfolioMetricsLog.objects.filter(
-        scheme=scheme
-    ).order_by('-period_date')
+    # Step 1: Read TOTALS row data from worksheet
+    totals_row_data = []
+    for col_idx in range(total_columns):
+        cell_value = ws.cell(row=totals_row_index, column=col_idx + 1).value
+        totals_row_data.append(cell_value if cell_value is not None else 0)
 
-    # Create period lookup
-    metrics_by_period = {pm.period_date: pm for pm in portfolio_metrics_query}
+    logger.info(f"Read TOTALS row with {len(totals_row_data)} columns")
 
-    # Debug logging
-    logger.info(f"Portfolio metrics - Found {len(metrics_by_period)} periods for fund {scheme.name}")
-    logger.info(f"Section start columns: {section_start_columns}")
+    # Step 2: Build section column mapping
+    section_cols = build_section_column_mapping(section_start_columns, periods)
+    logger.info(f"Built section column mapping for {len(section_cols)} sections")
 
-    # Get all periods (TTM + Quarterly combined, sorted descending)
-    all_ttm_periods = sorted(periods.get('ttm_periods', []), reverse=True)
-    all_quarterly_periods = sorted(periods.get('quarterly_periods', []), reverse=True)
+    # Step 3: Calculate all metrics from TOTALS row
+    patm_metrics = calculate_patm_from_totals(totals_row_data, section_cols)
+    qoq_metrics = calculate_qoq_from_totals(totals_row_data, section_cols)
+    yoy_metrics = calculate_yoy_from_totals(totals_row_data, section_cols)
+    cagr_metrics = calculate_6yr_cagr_from_totals(totals_row_data, section_cols)
+    pe_pr_metrics = calculate_pe_pr_from_totals(totals_row_data, section_cols)
+    pe_pr_avgs = calculate_pe_pr_averages_from_totals(totals_row_data, section_cols)
+    reval_deval = calculate_reval_deval_from_totals({**pe_pr_metrics, **pe_pr_avgs})
+    pr_extremes = calculate_pr_10q_extremes_from_totals(totals_row_data, section_cols)
+    pe_yield = calculate_pe_yield_from_totals(pe_pr_metrics)
+    growth = calculate_growth_from_totals(cagr_metrics)
+    bond_rate = get_bond_rate()
 
-    logger.info(f"TTM periods: {len(all_ttm_periods)}, Quarterly periods: {len(all_quarterly_periods)}")
+    logger.info("Calculated all portfolio metrics from TOTALS")
 
-    # Sample first metric for debugging
-    if metrics_by_period:
-        first_period = list(metrics_by_period.keys())[0]
-        first_pm = metrics_by_period[first_period]
-        logger.info(f"Sample metric - Period: {first_period}, PATM: {first_pm.patm}, QoQ: {first_pm.qoq_growth}, YoY: {first_pm.yoy_growth}")
-
-    # Define 27 metric rows (22 with data + 5 blank)
-    # Format: (field_name, label, section_type, periods_list)
-    metric_definitions = [
-        ('patm', 'PATM', 'ttm_pat', all_ttm_periods),
-        ('qoq_growth', 'QoQ', 'quarterly_revenue', all_quarterly_periods),
-        ('yoy_growth', 'YoY', 'ttm_revenue', all_ttm_periods),
-        ('revenue_6yr_cagr', '6 year CAGR', 'ttm_revenue', all_ttm_periods),
-        (None, None, None, None),  # Blank row
-        ('current_pe', 'Current PE', 'market_cap_free_float', all_ttm_periods),
-        ('pe_2yr_avg', '2 year average', 'market_cap_free_float', all_ttm_periods),
-        ('pe_5yr_avg', '5 year average', 'market_cap_free_float', all_ttm_periods),
-        ('pe_2yr_reval_deval', '2 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
-        ('pe_5yr_reval_deval', '5 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
-        (None, None, None, None),  # Blank row
-        ('current_pr', 'Current PR', 'market_cap_free_float', all_ttm_periods),
-        ('pr_2yr_avg', '2 year average', 'market_cap_free_float', all_ttm_periods),
-        ('pr_5yr_avg', '5 year average', 'market_cap_free_float', all_ttm_periods),
-        ('pr_2yr_reval_deval', '2 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
-        ('pr_5yr_reval_deval', '5 years - Reval / Deval', 'market_cap_free_float', all_ttm_periods),
-        (None, None, None, None),  # Blank row
-        ('pr_10q_low', '10 quarter- PR- low', 'market_cap_free_float', all_ttm_periods),
-        ('pr_10q_high', '10 quarter- PR- high', 'market_cap_free_float', all_ttm_periods),
-        (None, None, None, None),  # Blank row
-        ('alpha_bond_cagr', 'Alpha over the bond- CAGR', 'market_cap_free_float', all_ttm_periods),
-        ('alpha_absolute', 'Alpha- Absolute', 'market_cap_free_float', all_ttm_periods),
-        ('pe_yield', 'PE Yield', 'market_cap_free_float', all_ttm_periods),
-        ('growth_rate', 'Growth', 'market_cap_free_float', all_ttm_periods),
-        ('bond_rate', 'Bond Rate', 'market_cap_free_float', all_ttm_periods),
-        (None, None, None, None),  # Blank row
-        (None, None, None, None),  # Blank row
+    # Step 4: Define 27 metric rows
+    metric_rows = [
+        {
+            'label': 'PATM',
+            'data': patm_metrics,
+            'sections': ['ttm_pat', 'ttm_pat_free_float', 'quarterly_pat', 'quarterly_pat_free_float']
+        },
+        {
+            'label': 'QoQ',
+            'data': qoq_metrics,
+            'sections': ['quarterly_revenue', 'quarterly_revenue_free_float',
+                        'quarterly_pat', 'quarterly_pat_free_float']
+        },
+        {
+            'label': 'YoY',
+            'data': yoy_metrics,
+            'sections': ['ttm_revenue', 'ttm_revenue_free_float', 'quarterly_revenue',
+                        'quarterly_revenue_free_float', 'ttm_pat', 'ttm_pat_free_float',
+                        'quarterly_pat', 'quarterly_pat_free_float']
+        },
+        {
+            'label': '6 year CAGR',
+            'data': cagr_metrics,
+            'sections': ['ttm_revenue', 'ttm_revenue_free_float', 'ttm_pat', 'ttm_pat_free_float']
+        },
+        None,  # Blank
+        {
+            'label': 'Current PE',
+            'data': {'value': pe_pr_metrics.get('current_pe')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '2 year average',
+            'data': {'value': pe_pr_avgs.get('pe_2yr_avg')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '5 year average',
+            'data': {'value': pe_pr_avgs.get('pe_5yr_avg')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '2 years - Reval / Deval',
+            'data': {'value': reval_deval.get('pe_2yr_reval_deval')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '5 years - Reval / Deval',
+            'data': {'value': reval_deval.get('pe_5yr_reval_deval')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        None,  # Blank
+        {
+            'label': 'Current PR',
+            'data': {'value': pe_pr_metrics.get('current_pr')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '2 year average',
+            'data': {'value': pe_pr_avgs.get('pr_2yr_avg')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '5 year average',
+            'data': {'value': pe_pr_avgs.get('pr_5yr_avg')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '2 years - Reval / Deval',
+            'data': {'value': reval_deval.get('pr_2yr_reval_deval')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '5 years - Reval / Deval',
+            'data': {'value': reval_deval.get('pr_5yr_reval_deval')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        None,  # Blank
+        {
+            'label': '10 quarter- PR- low',
+            'data': {'value': pr_extremes.get('pr_10q_low')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': '10 quarter- PR- high',
+            'data': {'value': pr_extremes.get('pr_10q_high')},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        None,  # Blank
+        {
+            'label': 'Alpha over the bond- CAGR',
+            'data': {'value': 0.0},  # TODO: Implement if needed
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': 'Alpha- Absolute',
+            'data': {'value': 0.0},  # TODO: Implement if needed
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': 'PE Yield',
+            'data': {'value': pe_yield},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': 'Growth',
+            'data': {'value': growth},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        {
+            'label': 'Bond Rate',
+            'data': {'value': bond_rate},
+            'sections': ['market_cap_free_float'],
+            'single_value': True
+        },
+        None,  # Blank
+        None,  # Blank
     ]
 
-    # For each metric, create a row
-    for metric_field, metric_label, section_type, periods_list in metric_definitions:
-        metric_row = [''] * total_columns
-        metric_row[0] = metric_label if metric_label else ''  # Label in Column A
-
-        if metric_field and section_type:  # Skip blank rows
-            # Get section start column
-            section_start_col = section_start_columns.get(section_type)
-
-            # Debug logging for first few metrics
-            if metric_label in ['PATM', 'QoQ', 'YoY']:
-                logger.info(f"Metric '{metric_label}': section={section_type}, start_col={section_start_col}, periods={len(periods_list) if periods_list else 0}")
-
-            if section_start_col is not None and periods_list:
-                # Populate values for each period in this section
-                for period_idx, period in enumerate(periods_list):
-                    col_idx = section_start_col + period_idx
-
-                    if col_idx < total_columns:
-                        # Convert period string (e.g., '202506') to date object (2025-06-01)
-                        # PortfolioMetricsLog.period_date is a date field, but periods are collected as strings
-                        from datetime import datetime
-                        if isinstance(period, str):
-                            # Period is YYYYMM string, convert to date (first day of month)
-                            period_date = datetime.strptime(period, '%Y%m').date()
-                        else:
-                            period_date = period  # Already a date object
-
-                        # Get portfolio metric for this period using DATE object
-                        pm = metrics_by_period.get(period_date)
-                        if pm:
-                            value = getattr(pm, metric_field, None)
-                            metric_row[col_idx] = value
-
-                            # Debug logging for first 3 values of key metrics
-                            if metric_label in ['PATM', 'QoQ'] and period_idx < 3:
-                                logger.info(f"  Writing {metric_label} for {period_date}: value={value}, col={col_idx}")
-
+    # Step 5: Write rows to worksheet
+    for row_def in metric_rows:
+        metric_row = create_metric_row(row_def, section_cols, total_columns)
         ws.append(metric_row)
+
+    logger.info(f"Added 27 portfolio metric rows calculated from TOTALS")

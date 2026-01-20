@@ -312,11 +312,11 @@ class PortfolioMetricsCalculator:
         # Phase 5: Portfolio aggregation
         phase_start = time.time()
 
-        # Update AMCFundScheme with weighted portfolio-level aggregated metrics (latest period only)
-        self.update_fund_latest_metrics_weighted(scheme, portfolio_holdings_metrics)
+        # Update AMCFundScheme with TOTALS-based portfolio-level aggregated metrics (latest period only)
+        self.update_fund_latest_metrics_from_totals(scheme, portfolio_holdings_metrics)
 
-        # NEW: Calculate and save portfolio-level metrics for ALL periods
-        logger.info(f"Calculating portfolio-level weighted metrics for ALL periods")
+        # Calculate and save portfolio-level metrics for ALL periods
+        logger.info(f"Calculating portfolio-level TOTALS-based metrics for ALL periods")
         self.calculate_portfolio_metrics_all_periods(scheme, all_period_holdings_metrics)
 
         performance_stats['phases']['portfolio_aggregation'] = time.time() - phase_start
@@ -456,8 +456,10 @@ class PortfolioMetricsCalculator:
             metrics['pr_5yr_reval_deval'] = self.calculate_pr_reval_deval_cached(filtered_market_cap, filtered_ttm, 5)
             metrics['pr_10q_low'] = self.calculate_pr_10q_low_cached(filtered_market_cap, filtered_quarterly)
             metrics['pr_10q_high'] = self.calculate_pr_10q_high_cached(filtered_market_cap, filtered_quarterly)
-            metrics['alpha_bond_cagr'] = self.calculate_alpha_bond_cagr_cached(filtered_price)
-            metrics['alpha_absolute'] = self.calculate_alpha_absolute_cached(filtered_price)
+            metrics['alpha_bond_cagr'] = self.calculate_alpha_bond_cagr_cached(
+                filtered_market_cap, filtered_ttm, metrics['revenue_6yr_cagr']
+            )
+            metrics['alpha_absolute'] = self.calculate_alpha_absolute_cached(metrics['alpha_bond_cagr'])
             metrics['pe_yield'] = self.calculate_pe_yield_cached(filtered_market_cap, filtered_ttm)
             metrics['growth_rate'] = self.calculate_growth_rate_cached(filtered_ttm)
             metrics['bond_rate'] = self.calculate_bond_rate_cached()
@@ -672,15 +674,81 @@ class PortfolioMetricsCalculator:
 
         return max(pr_ratios) if pr_ratios else 0.0
 
-    def calculate_alpha_bond_cagr_cached(self, price_data):
-        """Calculate Alpha over bond CAGR using cached price data"""
-        # Placeholder - would need proper price return calculation
-        return 0.0
+    def calculate_alpha_bond_cagr_cached(self, market_cap_data, ttm_data, revenue_cagr):
+        """
+        Calculate Alpha over Bond CAGR
+        Formula: (((100+((100*PE_YIELD)+(100*PE_YIELD)*(1+GROWTH)+...)))/100)^(1/10)-1)-BOND_RATE
 
-    def calculate_alpha_absolute_cached(self, price_data):
-        """Calculate Alpha absolute using cached price data"""
-        # Placeholder - would need proper price return calculation
-        return 0.0
+        This calculates 10-year compounded return using PE Yield and Growth, minus bond rate.
+        """
+        if not market_cap_data or not ttm_data or revenue_cagr is None:
+            return 0.0
+
+        try:
+            # Calculate PE Yield (1 / PE) as percentage
+            pe_yield_pct = self.calculate_pe_yield_cached(market_cap_data, ttm_data)
+            # Return 0.0 for negative or zero PE yield (loss-making companies have negative PE)
+            if not pe_yield_pct or pe_yield_pct <= 0:
+                return 0.0
+
+            # Use revenue 6-year CAGR as growth rate (already in percentage)
+            growth_pct = revenue_cagr if revenue_cagr else 0.0
+
+            # Bond rate
+            bond_rate_pct = 5.117
+
+            # Convert percentages to decimals for calculation
+            pe_yield = pe_yield_pct / 100
+            growth = growth_pct / 100
+            bond_rate = bond_rate_pct / 100
+
+            # Calculate 10-year compounded value
+            # Starting with 100, add PE_YIELD each year compounded by growth
+            total = 100
+            for year in range(10):
+                total += 100 * pe_yield * ((1 + growth) ** year)
+
+            # Ensure total is positive before fractional exponent to avoid complex numbers
+            if total <= 0:
+                return 0.0
+
+            # Calculate CAGR
+            cagr = (total / 100) ** (1/10) - 1
+
+            # Safety check: ensure result is not complex (Python returns complex for negative^fraction)
+            if isinstance(cagr, complex):
+                return 0.0
+
+            # Alpha = CAGR - Bond Rate
+            alpha = cagr - bond_rate
+
+            # Return as percentage
+            return alpha * 100
+        except Exception as e:
+            logger.error(f"Error calculating Alpha Bond CAGR: {e}")
+            return 0.0
+
+    def calculate_alpha_absolute_cached(self, alpha_bond_cagr_pct):
+        """
+        Calculate Alpha Absolute
+        Formula: (1 + Alpha_Bond_CAGR)^10 - 1
+        This is the total 10-year return.
+        """
+        if alpha_bond_cagr_pct is None:
+            return 0.0
+
+        try:
+            alpha_bond = alpha_bond_cagr_pct / 100  # Convert to decimal
+            result = ((1 + alpha_bond) ** 10 - 1) * 100  # Return as percentage
+
+            # Safety check: ensure result is not complex
+            if isinstance(result, complex):
+                return 0.0
+
+            return result
+        except Exception as e:
+            logger.error(f"Error calculating Alpha Absolute: {e}")
+            return 0.0
 
     def calculate_pe_yield_cached(self, market_cap_data, ttm_data):
         """Calculate PE yield using cached data"""
@@ -713,8 +781,8 @@ class PortfolioMetricsCalculator:
         return ((revenue_growth + pat_growth) / 2) * 100
 
     def calculate_bond_rate_cached(self):
-        """Calculate bond rate - static for now"""
-        return 6.0  # 6% default bond rate
+        """Calculate bond rate - 7.31% × 0.7"""
+        return 5.117  # 7.31% × 0.7 = 5.117%
 
     def batch_save_metrics(self, scheme, holdings_metrics_list):
         """
@@ -1225,57 +1293,41 @@ class PortfolioMetricsCalculator:
         scheme.save()
         logger.info(f"Updated latest metrics for fund: {scheme.name}")
 
-    def update_fund_latest_metrics_weighted(self, scheme, holdings_metrics):
+    def update_fund_latest_metrics_from_totals(self, scheme, holdings_metrics):
         """
-        Update AMCFundScheme with properly weighted portfolio-level metrics
-        Following Excel methodology: Portfolio_Metric = Σ(Stock_Metric × Holding_Weight)
+        Update AMCFundScheme with TOTALS-based portfolio-level metrics
+        Following Excel methodology: Portfolio metrics calculated from TOTALS row
 
         Excel Implementation:
-        - Factor = Position Value / Total Market Cap (Column G = H/E in Portfolio Analysis)
-        - Weighted Metric = Individual_Metric × Factor
-        - Portfolio Total = SUBTOTAL(9, weighted_range)
+        - Portfolio Financials = Σ(Stock_Financials) - Simple sum, no weighting
+        - Portfolio PATM = (TOTAL PAT / TOTAL Revenue) × 100
+        - Portfolio PE = TOTAL Market Cap / TOTAL PAT
+        - Portfolio PR = TOTAL Market Cap / TOTAL Revenue
+        - All other metrics = Σ(Stock_Metrics) - Simple sum
         """
 
         if not holdings_metrics:
             logger.warning(f"No holdings metrics data for fund {scheme.name}")
             return
 
-        logger.info(f"Calculating weighted portfolio metrics for {scheme.name} with {len(holdings_metrics)} holdings")
+        logger.info(f"Calculating TOTALS-based portfolio metrics for {scheme.name} with {len(holdings_metrics)} holdings")
 
-        # Calculate total portfolio value for weighting (like Excel total market cap)
-        total_portfolio_value = 0
-        for holding, metrics in holdings_metrics:
-            if holding.market_value:
-                total_portfolio_value += holding.market_value
-
-        if total_portfolio_value == 0:
-            logger.warning(f"Total portfolio value is 0 for fund {scheme.name}")
-            return
-
-        # Prepare aggregated portfolio financials for ratio calculations (Excel method)
+        # Prepare aggregated portfolio financials for ratio calculations (TOTALS method)
         portfolio_financials = {
             'market_cap': 0,
             'ttm_revenue': 0,
             'ttm_pat': 0
         }
 
-        # Initialize weighted metric sums
-        weighted_metrics = {}
+        # Initialize metric sums (simple sums, not weighted)
+        total_metrics = {}
 
-        # Define metrics that should be calculated from portfolio financials (like Excel)
+        # Define metrics that should be calculated from portfolio financials (TOTALS method)
         # These are ratio metrics that need portfolio-level calculation
         ratio_metrics = {'patm', 'current_pe', 'current_pr'}
 
-        logger.debug(f"Total portfolio value: {total_portfolio_value:,.2f}")
-
         for holding, metrics in holdings_metrics:
-            # Calculate weight as percentage of total portfolio value (Excel Factor calculation)
-            weight = (holding.market_value / total_portfolio_value) if holding.market_value else 0
-
-            if weight == 0:
-                continue
-
-            logger.debug(f"Stock {holding.stock.company_name}: Weight = {weight:.4f} ({holding.holding_percentage}%)")
+            logger.debug(f"Stock {holding.stock.company_name}: Adding to portfolio TOTALS")
 
             # Get stock's latest financial data for portfolio aggregation
             stock = holding.stock
@@ -1283,48 +1335,48 @@ class PortfolioMetricsCalculator:
             # Get latest market cap data
             market_cap_data = StockMarketCap.objects.filter(stock=stock).first()
             if market_cap_data and market_cap_data.market_cap:
-                portfolio_financials['market_cap'] += market_cap_data.market_cap * weight
+                portfolio_financials['market_cap'] += market_cap_data.market_cap  # Simple sum (no weight)
 
             # Get latest TTM data for revenue and PAT aggregation
             ttm_data = StockTTMData.objects.filter(stock=stock).first()
             if ttm_data:
                 if ttm_data.ttm_revenue:
-                    portfolio_financials['ttm_revenue'] += ttm_data.ttm_revenue * weight
+                    portfolio_financials['ttm_revenue'] += ttm_data.ttm_revenue  # Simple sum (no weight)
                 if ttm_data.ttm_pat:
-                    portfolio_financials['ttm_pat'] += ttm_data.ttm_pat * weight
+                    portfolio_financials['ttm_pat'] += ttm_data.ttm_pat  # Simple sum (no weight)
 
-            # Weight all other metrics (growth rates, averages, etc.) following Excel methodology
+            # Sum all other metrics (growth rates, averages, etc.) using simple sum methodology
             for metric_name, value in metrics.items():
                 if value is not None and metric_name not in ratio_metrics:
-                    if metric_name not in weighted_metrics:
-                        weighted_metrics[metric_name] = 0
-                    # Apply Excel weighting: Metric × Weight
-                    weighted_metrics[metric_name] += value * weight
+                    if metric_name not in total_metrics:
+                        total_metrics[metric_name] = 0
+                    # Apply simple sum (no weighting)
+                    total_metrics[metric_name] += value
 
-        # Calculate ratio metrics from aggregated portfolio financials (Excel TOTALS method)
-        logger.debug(f"Portfolio aggregated - Market Cap: {portfolio_financials['market_cap']:,.2f}, "
+        # Calculate ratio metrics from aggregated portfolio financials (TOTALS method)
+        logger.debug(f"Portfolio TOTALS - Market Cap: {portfolio_financials['market_cap']:,.2f}, "
                     f"Revenue: {portfolio_financials['ttm_revenue']:,.2f}, PAT: {portfolio_financials['ttm_pat']:,.2f}")
 
-        # Portfolio PATM = Portfolio PAT / Portfolio Revenue × 100
+        # Portfolio PATM = Total PAT / Total Revenue × 100
         if portfolio_financials['ttm_revenue'] and portfolio_financials['ttm_revenue'] != 0:
             if portfolio_financials['ttm_pat']:
-                weighted_metrics['patm'] = (portfolio_financials['ttm_pat'] / portfolio_financials['ttm_revenue']) * 100
-                logger.debug(f"Portfolio PATM: {weighted_metrics['patm']:.2f}%")
+                total_metrics['patm'] = (portfolio_financials['ttm_pat'] / portfolio_financials['ttm_revenue']) * 100
+                logger.debug(f"Portfolio PATM: {total_metrics['patm']:.2f}%")
 
-            # Portfolio PR = Portfolio Market Cap / Portfolio Revenue
+            # Portfolio PR = Total Market Cap / Total Revenue
             if portfolio_financials['market_cap']:
-                weighted_metrics['current_pr'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_revenue']
-                logger.debug(f"Portfolio PR: {weighted_metrics['current_pr']:.2f}")
+                total_metrics['current_pr'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_revenue']
+                logger.debug(f"Portfolio PR: {total_metrics['current_pr']:.2f}")
 
-        # Portfolio PE = Portfolio Market Cap / Portfolio PAT
+        # Portfolio PE = Total Market Cap / Total PAT
         if portfolio_financials['ttm_pat'] and portfolio_financials['ttm_pat'] != 0:
             if portfolio_financials['market_cap']:
-                weighted_metrics['current_pe'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_pat']
-                logger.debug(f"Portfolio PE: {weighted_metrics['current_pe']:.2f}")
+                total_metrics['current_pe'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_pat']
+                logger.debug(f"Portfolio PE: {total_metrics['current_pe']:.2f}")
 
-        # Update AMCFundScheme fields with weighted metrics
+        # Update AMCFundScheme fields with TOTALS-based metrics
         update_fields = {}
-        for metric_name, value in weighted_metrics.items():
+        for metric_name, value in total_metrics.items():
             field_name = f"latest_{metric_name}"
             update_fields[field_name] = value
 
@@ -1337,13 +1389,14 @@ class PortfolioMetricsCalculator:
 
         scheme.save()
 
-        logger.info(f"Successfully updated weighted portfolio metrics for fund: {scheme.name}")
-        logger.info(f"Updated {len(weighted_metrics)} metrics with proper Excel-style weighting")
+        logger.info(f"Successfully updated TOTALS-based portfolio metrics for fund: {scheme.name}")
+        logger.info(f"Updated {len(total_metrics)} metrics using simple sum methodology")
 
     def calculate_portfolio_metrics_all_periods(self, scheme, all_period_holdings_metrics):
         """
-        NEW: Calculate portfolio-level weighted metrics for ALL periods and save to PortfolioMetricsLog
-        Similar to update_fund_latest_metrics_weighted but for ALL periods instead of just latest
+        Calculate portfolio-level TOTALS-based metrics for ALL periods and save to PortfolioMetricsLog
+        Similar to update_fund_latest_metrics_from_totals but for ALL periods instead of just latest
+        Uses simple sum methodology to aggregate stock financials, then calculates portfolio ratios.
         """
         from gcia_app.models import PortfolioMetricsLog
         from django.utils import timezone
@@ -1353,7 +1406,7 @@ class PortfolioMetricsCalculator:
             logger.warning(f"No holdings metrics data for ALL periods for fund {scheme.name}")
             return
 
-        logger.info(f"Calculating portfolio-level weighted metrics for ALL periods for {scheme.name}")
+        logger.info(f"Calculating portfolio-level TOTALS-based metrics for ALL periods for {scheme.name}")
 
         # Group metrics by period_date and period_type
         period_groups = defaultdict(list)
@@ -1366,44 +1419,32 @@ class PortfolioMetricsCalculator:
         portfolio_metrics_records = []
 
         for (period_date, period_type), holdings_metrics in period_groups.items():
-            # Calculate total portfolio value for this period
-            total_portfolio_value = sum(holding.market_value or 0 for holding, _ in holdings_metrics)
+            # Initialize metric sums for this period (simple sums, not weighted)
+            total_metrics = {}
 
-            if total_portfolio_value == 0:
-                logger.debug(f"Skipping period {period_date} ({period_type}) - zero portfolio value")
-                continue
-
-            # Initialize weighted metric sums for this period
-            weighted_metrics = {}
-
-            # Define metrics that should be calculated from portfolio financials
+            # Define metrics that should be calculated from portfolio financials (TOTALS method)
             ratio_metrics = {'patm', 'current_pe', 'current_pr'}
 
-            # Prepare aggregated portfolio financials for ratio calculations
+            # Prepare aggregated portfolio financials for ratio calculations (TOTALS method)
             portfolio_financials = {
                 'market_cap': 0,
                 'ttm_revenue': 0,
                 'ttm_pat': 0
             }
 
-            # Calculate weighted metrics for this period
+            # Calculate TOTALS-based metrics for this period
             for holding, metrics in holdings_metrics:
-                weight = (holding.market_value / total_portfolio_value) if holding.market_value else 0
-
-                if weight == 0:
-                    continue
-
                 # Get stock's financial data for this period for portfolio aggregation
                 stock = holding.stock
 
-                # Get latest market cap data (like update_fund_latest_metrics_weighted does)
+                # Get latest market cap data
                 from gcia_app.models import StockMarketCap
                 market_cap_data = StockMarketCap.objects.filter(
                     stock=stock
                 ).order_by('-date').first()
 
                 if market_cap_data and market_cap_data.market_cap:
-                    portfolio_financials['market_cap'] += market_cap_data.market_cap * weight
+                    portfolio_financials['market_cap'] += market_cap_data.market_cap  # Simple sum (no weight)
 
                 # Get TTM/Quarterly data for this period
                 from gcia_app.models import StockTTMData, StockQuarterlyData
@@ -1416,62 +1457,62 @@ class PortfolioMetricsCalculator:
                     ttm_data = StockTTMData.objects.filter(stock=stock, period=period_int).first()
                     if ttm_data:
                         if ttm_data.ttm_revenue:
-                            portfolio_financials['ttm_revenue'] += ttm_data.ttm_revenue * weight
+                            portfolio_financials['ttm_revenue'] += ttm_data.ttm_revenue  # Simple sum (no weight)
                         if ttm_data.ttm_pat:
-                            portfolio_financials['ttm_pat'] += ttm_data.ttm_pat * weight
+                            portfolio_financials['ttm_pat'] += ttm_data.ttm_pat  # Simple sum (no weight)
                 elif period_type == 'quarterly':
                     quarterly_data = StockQuarterlyData.objects.filter(stock=stock, period=period_int).first()
                     if quarterly_data:
                         if quarterly_data.quarterly_revenue:
-                            portfolio_financials['ttm_revenue'] += quarterly_data.quarterly_revenue * weight
+                            portfolio_financials['ttm_revenue'] += quarterly_data.quarterly_revenue  # Simple sum (no weight)
                         if quarterly_data.quarterly_pat:
-                            portfolio_financials['ttm_pat'] += quarterly_data.quarterly_pat * weight
+                            portfolio_financials['ttm_pat'] += quarterly_data.quarterly_pat  # Simple sum (no weight)
 
-                # Weight all other metrics
+                # Sum all other metrics (simple sum, no weighting)
                 for metric_name, value in metrics.items():
                     if value is not None and metric_name not in ratio_metrics:
-                        if metric_name not in weighted_metrics:
-                            weighted_metrics[metric_name] = 0
-                        weighted_metrics[metric_name] += value * weight
+                        if metric_name not in total_metrics:
+                            total_metrics[metric_name] = 0
+                        total_metrics[metric_name] += value  # Simple sum (no weight)
 
-            # Calculate ratio metrics from aggregated portfolio financials
+            # Calculate ratio metrics from aggregated portfolio financials (TOTALS method)
             if portfolio_financials['ttm_revenue'] and portfolio_financials['ttm_revenue'] != 0:
                 if portfolio_financials['ttm_pat']:
-                    weighted_metrics['patm'] = (portfolio_financials['ttm_pat'] / portfolio_financials['ttm_revenue']) * 100
+                    total_metrics['patm'] = (portfolio_financials['ttm_pat'] / portfolio_financials['ttm_revenue']) * 100
                 if portfolio_financials['market_cap']:
-                    weighted_metrics['current_pr'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_revenue']
+                    total_metrics['current_pr'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_revenue']
 
             if portfolio_financials['ttm_pat'] and portfolio_financials['ttm_pat'] != 0:
                 if portfolio_financials['market_cap']:
-                    weighted_metrics['current_pe'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_pat']
+                    total_metrics['current_pe'] = portfolio_financials['market_cap'] / portfolio_financials['ttm_pat']
 
             # Create PortfolioMetricsLog record
             portfolio_metrics_records.append(PortfolioMetricsLog(
                 scheme=scheme,
                 period_date=period_date,
                 period_type=period_type,
-                patm=weighted_metrics.get('patm'),
-                qoq_growth=weighted_metrics.get('qoq_growth'),
-                yoy_growth=weighted_metrics.get('yoy_growth'),
-                revenue_6yr_cagr=weighted_metrics.get('revenue_6yr_cagr'),
-                pat_6yr_cagr=weighted_metrics.get('pat_6yr_cagr'),
-                current_pe=weighted_metrics.get('current_pe'),
-                pe_2yr_avg=weighted_metrics.get('pe_2yr_avg'),
-                pe_5yr_avg=weighted_metrics.get('pe_5yr_avg'),
-                pe_2yr_reval_deval=weighted_metrics.get('pe_2yr_reval_deval'),
-                pe_5yr_reval_deval=weighted_metrics.get('pe_5yr_reval_deval'),
-                current_pr=weighted_metrics.get('current_pr'),
-                pr_2yr_avg=weighted_metrics.get('pr_2yr_avg'),
-                pr_5yr_avg=weighted_metrics.get('pr_5yr_avg'),
-                pr_2yr_reval_deval=weighted_metrics.get('pr_2yr_reval_deval'),
-                pr_5yr_reval_deval=weighted_metrics.get('pr_5yr_reval_deval'),
-                pr_10q_low=weighted_metrics.get('pr_10q_low'),
-                pr_10q_high=weighted_metrics.get('pr_10q_high'),
-                alpha_bond_cagr=weighted_metrics.get('alpha_bond_cagr'),
-                alpha_absolute=weighted_metrics.get('alpha_absolute'),
-                pe_yield=weighted_metrics.get('pe_yield'),
-                growth_rate=weighted_metrics.get('growth_rate'),
-                bond_rate=weighted_metrics.get('bond_rate')
+                patm=total_metrics.get('patm'),
+                qoq_growth=total_metrics.get('qoq_growth'),
+                yoy_growth=total_metrics.get('yoy_growth'),
+                revenue_6yr_cagr=total_metrics.get('revenue_6yr_cagr'),
+                pat_6yr_cagr=total_metrics.get('pat_6yr_cagr'),
+                current_pe=total_metrics.get('current_pe'),
+                pe_2yr_avg=total_metrics.get('pe_2yr_avg'),
+                pe_5yr_avg=total_metrics.get('pe_5yr_avg'),
+                pe_2yr_reval_deval=total_metrics.get('pe_2yr_reval_deval'),
+                pe_5yr_reval_deval=total_metrics.get('pe_5yr_reval_deval'),
+                current_pr=total_metrics.get('current_pr'),
+                pr_2yr_avg=total_metrics.get('pr_2yr_avg'),
+                pr_5yr_avg=total_metrics.get('pr_5yr_avg'),
+                pr_2yr_reval_deval=total_metrics.get('pr_2yr_reval_deval'),
+                pr_5yr_reval_deval=total_metrics.get('pr_5yr_reval_deval'),
+                pr_10q_low=total_metrics.get('pr_10q_low'),
+                pr_10q_high=total_metrics.get('pr_10q_high'),
+                alpha_bond_cagr=total_metrics.get('alpha_bond_cagr'),
+                alpha_absolute=total_metrics.get('alpha_absolute'),
+                pe_yield=total_metrics.get('pe_yield'),
+                growth_rate=total_metrics.get('growth_rate'),
+                bond_rate=total_metrics.get('bond_rate')
             ))
 
         # Batch save all portfolio metrics
