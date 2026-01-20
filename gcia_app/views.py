@@ -16,6 +16,7 @@ import os
 import datetime
 from django.db import transaction
 from openpyxl import load_workbook
+from io import BytesIO
 import traceback
 from gcia_app.utils import update_avg_category_returns, calculate_scheme_age
 from gcia_app.portfolio_analysis_ppt import create_fund_presentation
@@ -2192,6 +2193,97 @@ def fund_analysis_metrics_view(request):
     return render(request, 'gcia_app/fund_analysis_metrics.html', context)
 
 @login_required
+def get_fund_holdings(request, scheme_id):
+    """
+    AJAX endpoint to get holdings for a fund (for exclusion dropdown)
+    Returns JSON with list of holdings and their percentages
+    """
+    from django.http import JsonResponse
+
+    try:
+        scheme = AMCFundScheme.objects.get(amcfundscheme_id=scheme_id, is_active=True)
+        holdings = FundHolding.objects.filter(scheme=scheme).select_related('stock').order_by('-holding_percentage')
+
+        holdings_data = [
+            {
+                'id': holding.fund_holding_id,
+                'stock_id': holding.stock.stock_id,
+                'company_name': holding.stock.company_name,
+                'percentage': f"{holding.holding_percentage:.2f}" if holding.holding_percentage else "0.00"
+            }
+            for holding in holdings
+        ]
+
+        return JsonResponse({
+            'success': True,
+            'holdings': holdings_data
+        })
+    except AMCFundScheme.DoesNotExist:
+        return JsonResponse({
+            'success': False,
+            'error': 'Fund not found'
+        }, status=404)
+    except Exception as e:
+        return JsonResponse({
+            'success': False,
+            'error': str(e)
+        }, status=400)
+
+def get_filtered_holdings(scheme, exclude_marketcap_year, exclude_holdings_ids):
+    """
+    Filter holdings based on exclusion criteria
+
+    Args:
+        scheme: AMCFundScheme instance
+        exclude_marketcap_year: Year string (e.g., "2019") or None
+        exclude_holdings_ids: List of holding IDs to exclude
+
+    Returns:
+        QuerySet of filtered FundHolding objects
+    """
+    from datetime import date
+    from django.db.models import Exists, OuterRef
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    # Start with all holdings
+    holdings = FundHolding.objects.filter(scheme=scheme).select_related('stock').prefetch_related(
+        'stock__market_cap_data', 'stock__ttm_data', 'stock__quarterly_data',
+        'stock__annual_ratios', 'stock__price_data'
+    ).order_by('-holding_percentage')
+
+    # EXCLUSION 1: MarketCap year filter
+    if exclude_marketcap_year:
+        try:
+            cutoff_year = int(exclude_marketcap_year)
+            cutoff_date = date(cutoff_year, 1, 1)
+
+            # Only include stocks with MarketCap data FROM cutoff year onwards
+            from gcia_app.models import StockMarketCap
+
+            marketcap_exists = StockMarketCap.objects.filter(
+                stock=OuterRef('stock'),
+                date__gte=cutoff_date  # >= (from year onwards)
+            )
+
+            holdings = holdings.annotate(
+                has_recent_marketcap=Exists(marketcap_exists)
+            ).filter(has_recent_marketcap=True)
+
+            logger.info(f"MarketCap filter: >{cutoff_year} (stocks with data from {cutoff_year} onwards)")
+
+        except (ValueError, TypeError) as e:
+            logger.error(f"Invalid marketcap year: {exclude_marketcap_year} - {e}")
+
+    # EXCLUSION 2: Specific holdings filter
+    if exclude_holdings_ids:
+        holdings = holdings.exclude(fund_holding_id__in=exclude_holdings_ids)
+        logger.info(f"Excluded {len(exclude_holdings_ids)} specific holdings")
+
+    return holdings
+
+@login_required
 def download_fund_metrics(request, scheme_id):
     """
     Download Excel file with fund holdings integrated into stock structure (Portfolio Analysis format)
@@ -2213,87 +2305,127 @@ def download_fund_metrics(request, scheme_id):
         # Get the selected fund scheme
         scheme = AMCFundScheme.objects.get(amcfundscheme_id=scheme_id, is_active=True)
 
-        # Get fund holdings with related stock data
-        holdings = FundHolding.objects.filter(scheme=scheme).select_related('stock').prefetch_related(
-            'stock__market_cap_data', 'stock__ttm_data', 'stock__quarterly_data',
-            'stock__annual_ratios', 'stock__price_data'
-        ).order_by('-holding_percentage')
+        # Parse exclusion parameters from GET request
+        exclude_marketcap_year = request.GET.get('exclude_marketcap', None)
+        exclude_holdings_param = request.GET.get('exclude_holdings', None)
 
-        if not holdings.exists():
-            messages.error(request, f"No holdings data found for {scheme.name}")
-            return redirect('fund_analysis_metrics')
+        # Parse comma-separated holding IDs
+        exclude_holdings_ids = []
+        if exclude_holdings_param:
+            try:
+                exclude_holdings_ids = [int(h_id.strip()) for h_id in exclude_holdings_param.split(',') if h_id.strip()]
+            except ValueError:
+                logger.warning(f"Invalid exclude_holdings parameter: {exclude_holdings_param}")
 
-        logger.info(f"Generating Portfolio Analysis Excel for {scheme.name} with {holdings.count()} holdings")
+        # Check if any exclusions are present
+        has_exclusions = bool(exclude_marketcap_year) or bool(exclude_holdings_ids)
 
-        # Create workbook with Portfolio Analysis format
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Portfolio Analysis"
-
-        # Generate dynamic headers and available periods
-        header_generator = DynamicHeaderGenerator()
-        available_periods = header_generator.get_available_periods_for_fund(scheme)
-
-        logger.info(f"Available periods: {len(available_periods['all'])} total periods")
-
-        # Create dynamic headers structure
-        dynamic_headers = header_generator.generate_dynamic_headers(available_periods)
-
-        # Calculate total columns dynamically
-        total_columns = len(dynamic_headers['row_3'])
-        logger.info(f"Generated {total_columns} columns dynamically")
-
-        # Add professional 8-row header structure
-        portfolio_date = holdings.first().holding_date if holdings.first().holding_date else datetime.now().date()
-
-        # ROW 1: Fund name only
-        row_1 = [''] * total_columns
-        row_1[0] = scheme.name
-        ws.append(row_1)
-
-        # ROW 2: Column position indicators
-        row_2 = [''] * total_columns
-        for i in range(total_columns):
-            row_2[i] = f"Col_{i+1}"
-        ws.append(row_2)
-
-        # ROW 3: Portfolio date + main headers
-        row_3 = dynamic_headers['row_3'].copy()
-        row_3[0] = f"Portfolio as on: {portfolio_date.strftime('%d %B %Y')}"
-        ws.append(row_3)
-
-        # ROW 4-7: Additional header structure
-        for row_num in ['row_4', 'row_5', 'row_6', 'row_7']:
-            if row_num in dynamic_headers:
-                ws.append(dynamic_headers[row_num])
-            else:
-                ws.append([''] * total_columns)
+        logger.info(f"Generating Portfolio Analysis Excel for {scheme.name}")
+        logger.info(f"Exclusion parameters - MarketCap: {exclude_marketcap_year}, Holdings: {exclude_holdings_ids}")
 
         # Use enhanced Excel export functionality
-        from .enhanced_excel_export import generate_enhanced_portfolio_analysis_excel
+        from .enhanced_excel_export import generate_enhanced_portfolio_analysis_excel, generate_recalculated_analysis_excel
+        from openpyxl import load_workbook
 
-        logger.info("Using enhanced Excel export with calculated metrics")
-        excel_content = generate_enhanced_portfolio_analysis_excel(scheme)
+        if not has_exclusions:
+            # NO EXCLUSIONS: Return single-sheet Excel (existing behavior)
+            logger.info("No exclusions - generating single-sheet Excel")
+            excel_content = generate_enhanced_portfolio_analysis_excel(scheme)
 
-        # Return the Excel file
-        response = HttpResponse(
-            excel_content.getvalue(),
-            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
-        filename = f"{scheme.name}_Portfolio_Analysis_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            response = HttpResponse(
+                excel_content.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            filename = f"{scheme.name}_Portfolio_Analysis_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
-        logger.info(f"Enhanced Excel file generated: {filename}")
-        return response
+            logger.info(f"Single-sheet Excel file generated: {filename}")
+            return response
+
+        else:
+            # EXCLUSIONS PRESENT: Generate dual-sheet Excel
+            logger.info("Exclusions detected - generating dual-sheet Excel")
+
+            # STEP 1: Generate Default Analysis sheet (from database)
+            logger.info("Generating Default Analysis sheet...")
+            default_excel = generate_enhanced_portfolio_analysis_excel(scheme)
+
+            # STEP 2: Get filtered holdings
+            logger.info("Filtering holdings based on exclusion criteria...")
+            filtered_holdings = get_filtered_holdings(scheme, exclude_marketcap_year, exclude_holdings_ids)
+
+            if not filtered_holdings.exists():
+                messages.error(request, "All holdings were excluded by the filters. Cannot generate Excel.")
+                return redirect('fund_analysis_metrics')
+
+            logger.info(f"Filtered holdings: {filtered_holdings.count()} stocks (out of {FundHolding.objects.filter(scheme=scheme).count()})")
+
+            # STEP 3: Generate Recalculated Analysis sheet (from filtered holdings)
+            logger.info("Generating Recalculated Analysis sheet...")
+            recalculated_excel = generate_recalculated_analysis_excel(scheme, filtered_holdings)
+
+            # STEP 4: Combine both sheets into one workbook
+            logger.info("Combining sheets into dual-sheet workbook...")
+
+            # Load default workbook
+            default_wb = load_workbook(default_excel)
+            default_ws = default_wb.active
+            default_ws.title = "Default Analysis"
+
+            # Load recalculated workbook
+            recalculated_wb = load_workbook(recalculated_excel)
+            recalculated_ws = recalculated_wb.active
+
+            # Copy recalculated sheet to default workbook
+            new_ws = default_wb.create_sheet(title="Recalculated Analysis")
+
+            # Copy all cells from recalculated sheet to new sheet
+            for row in recalculated_ws.iter_rows():
+                for cell in row:
+                    new_cell = new_ws[cell.coordinate]
+                    new_cell.value = cell.value
+
+                    # Copy formatting
+                    if cell.has_style:
+                        new_cell.font = cell.font.copy()
+                        new_cell.border = cell.border.copy()
+                        new_cell.fill = cell.fill.copy()
+                        new_cell.number_format = cell.number_format
+                        new_cell.protection = cell.protection.copy()
+                        new_cell.alignment = cell.alignment.copy()
+
+            # Copy column dimensions
+            for col_letter, col_dim in recalculated_ws.column_dimensions.items():
+                new_ws.column_dimensions[col_letter].width = col_dim.width
+
+            # Copy row dimensions
+            for row_num, row_dim in recalculated_ws.row_dimensions.items():
+                new_ws.row_dimensions[row_num].height = row_dim.height
+
+            logger.info("Dual-sheet workbook created successfully")
+
+            # STEP 5: Save and return dual-sheet workbook
+            dual_excel_content = BytesIO()
+            default_wb.save(dual_excel_content)
+            dual_excel_content.seek(0)
+
+            response = HttpResponse(
+                dual_excel_content.getvalue(),
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+            filename = f"{scheme.name}_Portfolio_Analysis_Dual_{timezone.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+            logger.info(f"Dual-sheet Excel file generated: {filename}")
+            return response
 
     except AMCFundScheme.DoesNotExist:
         messages.error(request, "Fund not found or inactive")
         return redirect('fund_analysis_metrics')
     except Exception as e:
-        logger.error(f"Error in enhanced download_fund_metrics: {e}")
-        print(f"Error in enhanced download_fund_metrics: {e}")
-        print(traceback.format_exc())
-        messages.error(request, f"Error generating enhanced fund metrics file: {e}")
+        logger.error(f"Error in download_fund_metrics for scheme {scheme_id}: {e}", exc_info=True)
+        traceback.print_exc()
+        messages.error(request, f"Error generating Excel file: {str(e)}")
         return redirect('fund_analysis_metrics')
 # Portfolio Metrics Calculation Views
 import uuid

@@ -102,6 +102,42 @@
                     </select>
                 </div>
 
+                <!-- Exclusion Filters Section -->
+                <div id="exclusion-filters" style="display: none;" class="mt-3">
+                    <hr>
+                    <h6 class="text-muted">Optional Filters (for Recalculated Analysis)</h6>
+
+                    <!-- MarketCap Exclusion -->
+                    <div class="form-group mb-3">
+                        <label for="marketcap-exclude-select" class="form-label">
+                            Exclude Market Cap:
+                            <i class="fas fa-info-circle text-info" data-bs-toggle="tooltip"
+                               title="Only include stocks with MarketCap data from selected year onwards"></i>
+                        </label>
+                        <select class="form-control" id="marketcap-exclude-select">
+                            <option value="">-- No Exclusion --</option>
+                        </select>
+                        <small class="form-text text-muted">
+                            E.g., >2019 = Only stocks with MarketCap data from 2019 onwards
+                        </small>
+                    </div>
+
+                    <!-- Holding Exclusion -->
+                    <div class="form-group mb-3">
+                        <label for="holding-exclude-select" class="form-label">
+                            Exclude Holdings (Multi-select):
+                            <i class="fas fa-info-circle text-info" data-bs-toggle="tooltip"
+                               title="Select holdings to exclude from recalculated analysis"></i>
+                        </label>
+                        <select class="form-control" id="holding-exclude-select" multiple size="6">
+                        </select>
+                        <small class="form-text text-muted">
+                            Hold Ctrl/Cmd to select multiple. Selected holdings will be excluded.
+                        </small>
+                    </div>
+                    <hr>
+                </div>
+
                 <div class="form-group">
                     <button type="button" class="btn btn-secondary" id="download-btn" disabled>Download Fund Metrics</button>
                     <button type="button" class="btn btn-outline-secondary" onclick="window.location.href='{% url 'home' %}'">Back to Home</button>
@@ -163,6 +199,55 @@
                 downloadBtn.classList.add('btn-secondary');
             }
 
+            // Populate MarketCap years dropdown
+            function populateMarketCapYears() {
+                const select = document.getElementById('marketcap-exclude-select');
+                const currentYear = new Date().getFullYear();
+                const startYear = 2019;
+
+                // Clear existing options (keep first one)
+                while (select.options.length > 1) {
+                    select.remove(1);
+                }
+
+                // Add year options
+                for (let year = startYear; year <= currentYear; year++) {
+                    const option = document.createElement('option');
+                    option.value = year;
+                    option.text = `>${year}`;
+                    select.add(option);
+                }
+            }
+
+            // Populate holdings dropdown via AJAX
+            function populateHoldingsDropdown(schemeId) {
+                const select = document.getElementById('holding-exclude-select');
+
+                // Show loading
+                select.innerHTML = '<option>Loading holdings...</option>';
+
+                fetch(`/app/get_fund_holdings/${schemeId}/`)
+                    .then(response => response.json())
+                    .then(data => {
+                        select.innerHTML = '';
+
+                        if (data.success && data.holdings) {
+                            data.holdings.forEach(holding => {
+                                const option = document.createElement('option');
+                                option.value = holding.id;
+                                option.text = `${holding.company_name} (${holding.percentage}%)`;
+                                select.add(option);
+                            });
+                        } else {
+                            select.innerHTML = '<option>Error loading holdings</option>';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Error fetching holdings:', error);
+                        select.innerHTML = '<option>Error loading holdings</option>';
+                    });
+            }
+
             // Handle fund selection
             if (fundSelect) {
                 fundSelect.addEventListener('change', function() {
@@ -186,6 +271,16 @@
                         if (fundInfo) {
                             fundInfo.style.display = 'block';
                         }
+
+                        // Show exclusion filters
+                        document.getElementById('exclusion-filters').style.display = 'block';
+
+                        // Populate MarketCap years
+                        populateMarketCapYears();
+
+                        // Populate holdings via AJAX
+                        populateHoldingsDropdown(selectedValue);
+
                     } else {
                         console.log('Disabling download button');
 
@@ -199,6 +294,9 @@
                         if (fundInfo) {
                             fundInfo.style.display = 'none';
                         }
+
+                        // Hide exclusion filters
+                        document.getElementById('exclusion-filters').style.display = 'none';
                     }
                 });
             }
@@ -393,37 +491,56 @@
                     const selectedFundId = fundSelect.value;
                     console.log('Selected fund ID:', selectedFundId);
 
-                    if (selectedFundId && selectedFundId !== '') {
-                        // Show loading state
-                        const originalText = this.innerHTML;
-                        this.disabled = true;
-                        this.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Generating Excel...';
-                        this.classList.remove('btn-primary');
-                        this.classList.add('btn-info');
-
-                        // Create download URL
-                        const downloadUrl = "{% url 'download_fund_metrics' 0 %}".replace('0', selectedFundId);
-                        console.log('Download URL:', downloadUrl);
-
-                        // Create a hidden link and click it to trigger download
-                        const link = document.createElement('a');
-                        link.href = downloadUrl;
-                        link.style.display = 'none';
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-
-                        // Reset button after a delay
-                        setTimeout(() => {
-                            this.disabled = false;
-                            this.innerHTML = originalText;
-                            this.classList.remove('btn-info');
-                            this.classList.add('btn-primary');
-                            console.log('Button reset');
-                        }, 3000);
-                    } else {
+                    if (!selectedFundId || selectedFundId === '') {
                         alert('Please select a fund first.');
+                        return;
                     }
+
+                    // Get exclusion parameters
+                    const excludeMarketCap = document.getElementById('marketcap-exclude-select').value;
+                    const excludeHoldingsSelect = document.getElementById('holding-exclude-select');
+                    const excludeHoldings = Array.from(excludeHoldingsSelect.selectedOptions).map(opt => opt.value);
+
+                    // Build download URL with parameters
+                    let downloadUrl = "{% url 'download_fund_metrics' 0 %}".replace('0', selectedFundId);
+
+                    const params = [];
+                    if (excludeMarketCap) {
+                        params.push(`exclude_marketcap=${excludeMarketCap}`);
+                    }
+                    if (excludeHoldings.length > 0) {
+                        params.push(`exclude_holdings=${excludeHoldings.join(',')}`);
+                    }
+
+                    if (params.length > 0) {
+                        downloadUrl += `?${params.join('&')}`;
+                    }
+
+                    console.log('Download URL with params:', downloadUrl);
+
+                    // Show loading state
+                    const originalText = this.innerHTML;
+                    this.disabled = true;
+                    this.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Generating Excel...';
+                    this.classList.remove('btn-primary');
+                    this.classList.add('btn-info');
+
+                    // Create a hidden link and click it to trigger download
+                    const link = document.createElement('a');
+                    link.href = downloadUrl;
+                    link.style.display = 'none';
+                    document.body.appendChild(link);
+                    link.click();
+                    document.body.removeChild(link);
+
+                    // Reset button after a delay
+                    setTimeout(() => {
+                        this.disabled = false;
+                        this.innerHTML = originalText;
+                        this.classList.remove('btn-info');
+                        this.classList.add('btn-primary');
+                        console.log('Button reset');
+                    }, 5000);  // 5 seconds for dual-sheet generation
                 });
             }
 

@@ -261,6 +261,80 @@ class FundPortfolioExportGenerator(BlockBasedExportGenerator):
             'pe_dates': sorted(pe_dates, reverse=True)
         }
 
+    def collect_periods_for_filtered_holdings(self, filtered_holdings):
+        """
+        Collect all available periods from filtered holdings' stocks.
+        Similar to collect_all_periods_for_fund but uses pre-filtered holdings QuerySet.
+
+        Args:
+            filtered_holdings: QuerySet of FundHolding objects (already filtered)
+
+        Returns:
+            Dict with sorted period lists for each data type
+        """
+        from .models import StockMarketCap, StockTTMData, StockQuarterlyData, StockAnnualRatios, StockPrice
+
+        # Get stock IDs from filtered holdings
+        stock_ids = [h.stock.stock_id for h in filtered_holdings]
+
+        if not stock_ids:
+            # Return empty periods if no stocks
+            logger.warning("No stocks in filtered holdings - returning empty periods")
+            return {
+                'market_cap_dates': [],
+                'ttm_periods': [],
+                'quarterly_periods': [],
+                'annual_years': [],
+                'share_price_dates': [],
+                'pr_dates': [],
+                'pe_dates': []
+            }
+
+        # Collect periods from filtered stocks only
+        market_cap_dates = set(StockMarketCap.objects.filter(
+            stock__stock_id__in=stock_ids
+        ).values_list('date', flat=True).distinct())
+
+        ttm_periods = set(StockTTMData.objects.filter(
+            stock__stock_id__in=stock_ids
+        ).values_list('period', flat=True).distinct())
+
+        quarterly_periods = set(StockQuarterlyData.objects.filter(
+            stock__stock_id__in=stock_ids
+        ).values_list('period', flat=True).distinct())
+
+        annual_years = set(StockAnnualRatios.objects.filter(
+            stock__stock_id__in=stock_ids
+        ).values_list('financial_year', flat=True).distinct())
+
+        share_price_dates = set(StockPrice.objects.filter(
+            stock__stock_id__in=stock_ids
+        ).values_list('price_date', flat=True).distinct())
+
+        # PR and PE dates from StockPrice
+        pr_dates = set(StockPrice.objects.filter(
+            stock__stock_id__in=stock_ids,
+            pr_ratio__isnull=False
+        ).values_list('price_date', flat=True).distinct())
+
+        pe_dates = set(StockPrice.objects.filter(
+            stock__stock_id__in=stock_ids,
+            pe_ratio__isnull=False
+        ).values_list('price_date', flat=True).distinct())
+
+        logger.info(f"Collected periods from {len(stock_ids)} filtered stocks")
+
+        # Sort all periods
+        return {
+            'market_cap_dates': sorted(market_cap_dates, reverse=True),
+            'ttm_periods': sorted(ttm_periods, reverse=True),
+            'quarterly_periods': sorted(quarterly_periods, reverse=True),
+            'annual_years': sorted(annual_years, reverse=True),
+            'share_price_dates': sorted(share_price_dates, reverse=True),
+            'pr_dates': sorted(pr_dates, reverse=True),
+            'pe_dates': sorted(pe_dates, reverse=True)
+        }
+
     def _generate_import_style_headers(self, blocks, total_columns):
         """
         Override parent to correctly position fundamental headers for Fund Analysis.
@@ -583,6 +657,135 @@ def generate_enhanced_portfolio_analysis_excel(scheme):
     apply_portfolio_analysis_formatting(ws, total_columns)
 
     logger.info("Enhanced Excel generation completed successfully")
+
+    # Save to BytesIO
+    excel_content = BytesIO()
+    wb.save(excel_content)
+    excel_content.seek(0)
+
+    return excel_content
+
+
+def generate_recalculated_analysis_excel(scheme, filtered_holdings):
+    """
+    Generate recalculated Portfolio Analysis Excel file using filtered holdings.
+    This is used for the "Recalculated Analysis" sheet in dual-sheet export.
+
+    Args:
+        scheme: AMCFundScheme instance
+        filtered_holdings: QuerySet of FundHolding objects (pre-filtered by exclusion criteria)
+
+    Returns:
+        BytesIO: Excel file content with recalculated metrics
+    """
+
+    logger.info(f"Generating Recalculated Portfolio Analysis Excel for {scheme.name} with {filtered_holdings.count()} filtered holdings")
+
+    if not filtered_holdings.exists():
+        raise ValueError(f"No holdings data found after filtering for {scheme.name}")
+
+    # Create workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Recalculated Analysis"
+
+    # Initialize FundPortfolioExportGenerator
+    generator = FundPortfolioExportGenerator(scheme)
+
+    # Collect periods ONLY from filtered stocks
+    periods = generator.collect_periods_for_filtered_holdings(filtered_holdings)
+
+    logger.info(f"Periods collected from filtered stocks:")
+    logger.info(f"  - Market cap dates: {len(periods['market_cap_dates'])}")
+    logger.info(f"  - TTM periods: {len(periods['ttm_periods'])}")
+    logger.info(f"  - Quarterly periods: {len(periods['quarterly_periods'])}")
+    logger.info(f"  - Annual years: {len(periods['annual_years'])}")
+    logger.info(f"  - Share price dates: {len(periods['share_price_dates'])}")
+    logger.info(f"  - PR dates: {len(periods['pr_dates'])}")
+    logger.info(f"  - PE dates: {len(periods['pe_dates'])}")
+
+    # Define block structure
+    blocks = generator._define_block_structure(periods)
+
+    # Calculate total columns
+    total_columns = generator._calculate_total_columns(blocks)
+
+    # Generate 8-row headers
+    headers = generator._generate_import_style_headers(blocks, total_columns)
+
+    logger.info(f"Generated {total_columns} columns with block-based structure")
+
+    # Add Row 1: Fund name
+    row_1 = [''] * total_columns
+    row_1[0] = scheme.name
+    ws.append(row_1)
+
+    # Add Row 2: Column indicators
+    ws.append(headers['row_2'])
+
+    # Add Row 3: Portfolio as on: [date]
+    latest_date = max(periods['market_cap_dates']) if periods['market_cap_dates'] else None
+    row_3_text = f"Portfolio as on: {latest_date.strftime('%d %B %Y')}" if latest_date else "Portfolio as on: N/A"
+    row_3 = [row_3_text] + [''] * (total_columns - 1)
+    ws.append(row_3)
+
+    # Add Rows 4-8: Remaining headers (blank rows + category headers + detail headers)
+    for row_num in range(3, 9):
+        header_row = headers[f'row_{row_num}']
+        ws.append(header_row)
+
+    # Add stock data rows (starting from row 9) - using FILTERED holdings
+    logger.info(f"Populating {filtered_holdings.count()} filtered stock rows using block-based structure")
+
+    # Collect stock row data for TOTALS calculation
+    stock_rows_data = []
+    for idx, holding in enumerate(filtered_holdings, start=1):
+        row_data = generator.populate_fund_stock_row(holding, blocks, total_columns)
+        stock_rows_data.append(row_data)
+        ws.append(row_data)
+
+    # Add 5 blank rows gap before TOTALS (as per sample file)
+    for _ in range(5):
+        blank_row = [''] * total_columns
+        ws.append(blank_row)
+
+    # Calculate TOTALS row by summing each column across all stock rows
+    totals_row = ['TOTALS'] + ['' for _ in range(total_columns - 1)]
+
+    logger.info("Calculating TOTALS row by summing all numeric columns (from filtered stocks)")
+
+    # Sum columns 4 onwards (skip Company Name, Accord Code, Sector, Cap which are non-numeric)
+    for col_idx in range(4, total_columns):
+        column_sum = 0
+        has_numeric_data = False
+
+        for stock_row in stock_rows_data:
+            value = stock_row[col_idx]
+            # Try to add numeric values
+            if value is not None and value != '':
+                try:
+                    column_sum += float(value)
+                    has_numeric_data = True
+                except (ValueError, TypeError):
+                    pass  # Skip non-numeric values (e.g., text)
+
+        # Set total if column had any numeric data
+        if has_numeric_data:
+            totals_row[col_idx] = column_sum
+
+    ws.append(totals_row)
+
+    # Add 27 portfolio metric rows at bottom (22 with data + 5 blank)
+    # NOTE: Portfolio metrics are recalculated from TOTALS row, not from database
+    logger.info("Adding portfolio metric rows (recalculated from filtered TOTALS)")
+    add_portfolio_metric_rows(ws, scheme, generator.section_start_columns, periods, total_columns)
+
+    logger.info("Recalculated Excel generation completed")
+
+    # Apply formatting
+    apply_portfolio_analysis_formatting(ws, total_columns)
+
+    logger.info("Recalculated Excel formatting applied successfully")
 
     # Save to BytesIO
     excel_content = BytesIO()
